@@ -110,24 +110,77 @@ current SSH transport validation.
 
 ## Mac setup
 
+### 1. Use the existing SSH host config
+
+The Mac already has everything needed to reach this development instance — the app reuses
+your **existing** `~/.ssh/config` entry, your SSH key, and host-key verification. Do not
+create a new key or a new host entry.
+
+What you need is one **alias** that resolves with key-based, non-interactive auth. That
+may already be the hostname or alias you use to `ssh` into this machine (for example
+`work`, or `ps6`-style bastions, or a `ProxyJump` configuration). The app asks for the
+alias by name and uses OpenSSH's normal config lookup, so anything you can `ssh` to today
+works.
+
+Verify the alias you will use works **non-interactively** — the app opens SSH without a
+terminal, so interactive password prompts will fail. On the Mac, this should return
+immediately with exit status 0 and no prompt:
+
+```bash
+ssh -T <alias> true
+echo $?
+```
+
+If it asks for a password, your existing config requires interactive auth for that alias.
+Fix it inside your own `~/.ssh/config` (e.g. add the right `IdentityFile`, or keep using
+the alias you already use non-interactively) rather than weakening verification. Never
+set `StrictHostKeyChecking=no`.
+
+- If the host is behind a bastion, your existing config's `ProxyJump`/`Host` settings are
+  honored automatically — the app just runs `ssh -T <alias> …`.
+- The alias must be one line in `~/.ssh/config` under `Host <alias>`; the app validates
+  the alias strictly (letters, digits, `.`, `_`, `:`, `@`, `-`).
+
+### 2. Build the macOS app
+
+Build the app from the fork for a remote-capable build (the upstream signed release does
+not yet contain the `remote-ui-plan` changes):
+
+```bash
+git clone https://github.com/yanksyoon/munder-difflin.git
+cd munder-difflin
+git checkout remote-ui-plan
+
+npm ci
+npm run dist:mac
+```
+
+### 3. Confirm the helper command through SSH
+
+Once both halves are set up, this should print the framed `hello` response (the production
+wrapper is required; the app passes it verbatim):
+
+```bash
+ssh -T work true
+# now explicitly, the helper path must exist and be executable on the remote
+ssh -T work -- /home/ubuntu/bin/munder-remote --stdio
+```
+
+You will not see human-readable text if the helper runs correctly with no protocol input —
+it waits on stdin. That non-interactive, no-prompt behaviour is what the app needs.
+
 1. Install the signed macOS build from the fork's release page when a remote-capable
-   release is published, or build the app from this branch with `npm ci` and `npm run dist:mac`.
-2. Ensure the Mac can connect to the work host with normal OpenSSH configuration:
-
-   ```bash
-   ssh -T work true
-   ```
-
-   Keep normal host-key verification enabled. Do not use `StrictHostKeyChecking=no`.
-3. Configure the app's remote target with:
-   - SSH host alias: `work`
+   release is published, or build the app from this branch per step 2 above.
+2. Open **Settings → Connections → Remote development host** and enter:
+   - SSH host alias: the alias you verified above from your existing `~/.ssh/config`
    - helper path: `/home/ubuntu/bin/munder-remote`
-4. Connect and confirm the hello response reports the expected protocol and capabilities.
-5. Start a remote provider only from a project directory under `MUNDER_REMOTE_ROOT`.
+3. Click **Connect** and confirm the hello response reports the expected protocol and
+   capabilities (the panel also shows the available remote capabilities).
+4. Start a remote provider only from a project directory under `MUNDER_REMOTE_ROOT`.
 
 The Mac does not need the provider CLI or provider credentials for a remote session. Those
-stay on `work`. The Mac does need its normal SSH key/agent access. SSH agent forwarding is
-not required and should remain disabled.
+stay on `work`. The Mac needs its `~/.ssh/config` alias and key-based access as configured
+above. SSH agent forwarding is not required and should remain disabled.
 
 ## Manual protocol smoke test
 

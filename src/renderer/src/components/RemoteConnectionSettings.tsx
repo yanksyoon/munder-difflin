@@ -178,6 +178,11 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
         <div style={{ fontSize: 12, lineHeight: '17px', color: 'var(--cth-ink-700)' }}>
           Connect the Mac UI to the helper running on the work host. SSH remains the only transport; local PTYs are unchanged.
         </div>
+        <div style={{ fontSize: 12, lineHeight: '17px', color: 'var(--cth-ink-500)', padding: 8, background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}>
+          The app reuses your existing <code>~/.ssh/config</code>. Enter the alias you already use to reach this host
+          (keys, bastions/ProxyJump and host-key verification are all honored from your normal config). Before connecting,
+          verify the alias is non-interactive: <code>ssh -T &lt;alias&gt; true</code> must return without asking for a password.
+        </div>
       </div>
       <label style={labelStyle}>SSH host alias<input value={host} onChange={(e) => setHost(e.target.value)} placeholder="work" style={inputStyle} /></label>
       <label style={labelStyle}>Absolute helper path<input value={helperPath} onChange={(e) => setHelperPath(e.target.value)} placeholder="/home/ubuntu/bin/munder-remote" style={inputStyle} /></label>
