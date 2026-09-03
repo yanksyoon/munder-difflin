@@ -104,45 +104,56 @@ PAYLOAD_SRC
 )"
   ssh -o BatchMode=yes -T -- "$ALIAS" 'bash -s' <<REMOTE_EOF
 set -euo pipefail
-mapfile -t LINES < <(base64 -d <<'B64'
-$PAYLOAD
-B64
-)
-declare -A V
-for _l in "\${LINES[@]}"; do
-  V[\${_l%%=*}]=\${_l#*=}
+# Bash3-safe payload decode: read all base64 lines, join, decode once.
+PAYLOAD_B64=""
+while IFS= read -r _l || [ -n "$_l" ]; do
+  PAYLOAD_B64="${PAYLOAD_B64}${_l}"
 done
-REMOTE_DIR=\${V[REMOTE_DIR]}
-REMOTE_ROOT=\${V[REMOTE_ROOT]}
-ALLOW=\${V[ALLOW]}
-FORK_URL=\${V[FORK_URL]}
-BRANCH=\${V[BRANCH]}
-[ -n "\$REMOTE_DIR" ] && [ -n "\$REMOTE_ROOT" ] && [ -n "\$ALLOW" ] || { echo "missing remote payload" >&2; exit 2; }
-if [ ! -d "\$REMOTE_DIR/.git" ]; then
-  git clone "\$FORK_URL" "\$REMOTE_DIR"
+PAYLOAD="$(printf '%s' "$PAYLOAD_B64" | base64 -d)"
+# Payload is a sequence of lines `KEY=VALUE`. Parse positionally without
+# associative arrays (macOS /bin/bash 3.2 has none).
+REMOTE_DIR=""; REMOTE_ROOT=""; ALLOW=""; FORK_URL=""; BRANCH=""
+IFS='
+'
+for _l in $PAYLOAD; do
+  case "$_l" in
+    REMOTE_DIR=*) REMOTE_DIR="${_l#REMOTE_DIR=}" ;;
+    REMOTE_ROOT=*) REMOTE_ROOT="${_l#REMOTE_ROOT=}" ;;
+    ALLOW=*) ALLOW="${_l#ALLOW=}" ;;
+    FORK_URL=*) FORK_URL="${_l#FORK_URL=}" ;;
+    BRANCH=*) BRANCH="${_l#BRANCH=}" ;;
+  esac
+done
+IFS=$' \t\n'
+[ -n "$REMOTE_DIR" ] && [ -n "$REMOTE_ROOT" ] && [ -n "$ALLOW" ] || { echo "missing remote payload" >&2; exit 2; }
+case "$REMOTE_DIR" in *[!A-Za-z0-9_./~-]*) echo "unsafe REMOTE_DIR" >&2; exit 2;; esac
+case "$REMOTE_ROOT" in *[!A-Za-z0-9_./~-]*) echo "unsafe REMOTE_ROOT" >&2; exit 2;; esac
+if [ ! -d "$REMOTE_DIR/.git" ]; then
+  git clone "$FORK_URL" "$REMOTE_DIR"
 fi
-cd "\$REMOTE_DIR"
-git fetch --force origin "\$BRANCH" >/dev/null
-git checkout -B "\$BRANCH" "origin/\$BRANCH" >/dev/null
-remote_node="\$(command -v node || true)"
-[ -n "\$remote_node" ] || { echo "remote node not found" >&2; exit 2; }
-echo "  remote node: \$remote_node"
+cd "$REMOTE_DIR"
+git fetch --force origin "$BRANCH" >/dev/null
+git checkout -B "$BRANCH" "origin/$BRANCH" >/dev/null
+remote_node="$(command -v node || true)"
+[ -n "$remote_node" ] || { echo "remote node not found" >&2; exit 2; }
+echo "  remote node: $remote_node"
 if [ ! -d node_modules ] || ! npm ls --depth=0 >/dev/null 2>&1; then
   npm ci --ignore-scripts
 fi
 npm rebuild node-pty >/dev/null 2>&1 || echo "  warning: npm rebuild node-pty failed (check g++/make/python3)" >&2
 npm run build:remote >/dev/null
-BIN_DIR="\$HOME/bin"
-mkdir -p "\$BIN_DIR"
-cat > "\$BIN_DIR/munder-remote" <<'WRAP'
-#!/bin/sh
-set -eu
-export MUNDER_REMOTE_ROOT='\$REMOTE_ROOT'
-export MUNDER_REMOTE_ALLOW_COMMANDS='\$ALLOW'
-exec '\$remote_node' '\$REMOTE_DIR/tools/remote-helper-launcher.cjs'
-WRAP
-chmod 700 "\$BIN_DIR/munder-remote"
-echo "  helper wrapper: \$BIN_DIR/munder-remote"
+BIN_DIR="$HOME/bin"
+mkdir -p "$BIN_DIR"
+# Write the wrapper with printf %q so decoded values are shell-quoted, never
+# raw-interpolated and never literal.
+{
+  printf '#!/bin/sh\nset -eu\n'
+  printf 'export MUNDER_REMOTE_ROOT=%q\n' "$REMOTE_ROOT"
+  printf 'export MUNDER_REMOTE_ALLOW_COMMANDS=%q\n' "$ALLOW"
+  printf 'exec %q %q\n' "$remote_node" "$REMOTE_DIR/tools/remote-helper-launcher.cjs"
+} > "$BIN_DIR/munder-remote"
+chmod 700 "$BIN_DIR/munder-remote"
+echo "  helper wrapper: $BIN_DIR/munder-remote"
 REMOTE_EOF
   [ $? -eq 0 ] || die "Remote helper install failed (rc=$?)"
 else
