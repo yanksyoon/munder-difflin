@@ -10,6 +10,7 @@ import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { request as httpsRequest } from 'node:https';
 import { PtyManager, type SpawnOptions } from './pty';
+import { SshRemoteTransport } from './sshRemote';
 import { resolveCommand as resolveCliCommand, isSafeCommandName } from './shellEnv';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
@@ -107,6 +108,11 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const ptyManager = new PtyManager();
+/** Explicit remote transport. It is deliberately separate from ptyManager: remote
+ * sessions do not own local paths, local hive records, or local teardown hooks. */
+let remoteTransport: SshRemoteTransport | null = null;
+let remoteOwner: Electron.WebContents | null = null;
+let remoteGeneration = 0;
 
 function runCodexDaemonCommand(
   executable: string,
@@ -2444,6 +2450,105 @@ function installAppMenu(): void {
 }
 
 
+// ─── IPC: SSH remote transport (explicitly separate from local pty:* IPC) ────
+function remoteSenderSend(sender: Electron.WebContents, channel: string, payload: unknown): void {
+  if (sender.isDestroyed()) return;
+  try { sender.send(channel, payload); } catch { /* window closed during disconnect */ }
+}
+
+function closeRemoteTransport(): void {
+  const active = remoteTransport;
+  remoteTransport = null;
+  remoteOwner = null;
+  active?.close();
+}
+
+function remoteFor(sender: Electron.WebContents): SshRemoteTransport | null {
+  if (!remoteTransport || remoteOwner !== sender) return null;
+  return remoteTransport;
+}
+
+ipcMain.handle('remote:connect', async (evt, options: unknown) => {
+  if (!options || typeof options !== 'object') return { ok: false, error: 'invalid remote options' };
+  const candidate = options as { host?: unknown; helperPath?: unknown };
+  if (typeof candidate.host !== 'string' || typeof candidate.helperPath !== 'string') {
+    return { ok: false, error: 'host and helperPath are required' };
+  }
+  const generation = ++remoteGeneration;
+  closeRemoteTransport();
+  try {
+    const transport = new SshRemoteTransport({ host: candidate.host, helperPath: candidate.helperPath });
+    transport.onEvent((message) => remoteSenderSend(evt.sender, 'remote:event', message));
+    transport.onClose((error) => {
+      if (remoteTransport === transport) {
+        remoteTransport = null;
+        remoteOwner = null;
+        remoteSenderSend(evt.sender, 'remote:status', { connected: false, error: error?.message });
+      }
+    });
+    const hello = await transport.connect();
+    if (generation !== remoteGeneration || evt.sender.isDestroyed()) {
+      transport.close();
+      return { ok: false, error: 'remote connection was superseded' };
+    }
+    remoteTransport = transport;
+    remoteOwner = evt.sender;
+    remoteSenderSend(evt.sender, 'remote:status', { connected: true });
+    return { ok: true, hello: hello.payload };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle('remote:disconnect', (evt) => {
+  ++remoteGeneration;
+  if (remoteOwner && remoteOwner !== evt.sender) return { ok: false, error: 'remote transport belongs to another window' };
+  closeRemoteTransport();
+  return { ok: true };
+});
+ipcMain.handle('remote:list', async (evt) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport) return { ok: false, error: 'remote transport is not connected' };
+  try { return { ok: true, response: await transport.request('list', {}) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:start', async (evt, payload: unknown) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport) return { ok: false, error: 'remote transport is not connected' };
+  try { return { ok: true, response: await transport.request('start', payload) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:attach', async (evt, sessionId: unknown) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
+  try { return { ok: true, response: await transport.request('attach', { sessionId }, sessionId) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:input', async (evt, sessionId: unknown, data: unknown) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport || typeof sessionId !== 'string' || !sessionId || typeof data !== 'string') return { ok: false, error: 'invalid remote input' };
+  try { return { ok: true, response: await transport.request('input', { data }, sessionId) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:resize', async (evt, sessionId: unknown, cols: unknown, rows: unknown) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport || typeof sessionId !== 'string' || !sessionId || typeof cols !== 'number' || typeof rows !== 'number') return { ok: false, error: 'invalid remote resize' };
+  try { return { ok: true, response: await transport.request('resize', { cols, rows }, sessionId) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:signal', async (evt, sessionId: unknown, signal: unknown) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport || typeof sessionId !== 'string' || !sessionId || typeof signal !== 'string') return { ok: false, error: 'invalid remote signal' };
+  try { return { ok: true, response: await transport.request('signal', { signal }, sessionId) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:close', async (evt, sessionId: unknown) => {
+  const transport = remoteFor(evt.sender);
+  if (!transport || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
+  try { return { ok: true, response: await transport.request('close', {}, sessionId) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+
 // ─── IPC: pty lifecycle ─────────────────────────────────────────────────────
 /** Codex stores its rollout transcripts under a PER-AGENT CODEX_HOME
  *  (<hive>/agents/<id>/.codex/sessions/<Y>/<M>/<D>/rollout-*-<sessionId>.jsonl).
@@ -3691,6 +3796,7 @@ function teardownAndQuit(): void {
   try { reflector.stop(); } catch (e) { console.error('[quit] reflector.stop:', e); }
   try { persist.close(); } catch (e) { console.error('[quit] persist.close:', e); }
   try { hive.stopAllProxyBridges(); } catch (e) { console.error('[quit] stopAllProxyBridges:', e); }
+  try { closeRemoteTransport(); } catch (e) { console.error('[quit] remote.close:', e); }
   try { ptyManager.killAll(); } catch (e) { console.error('[quit] killAll:', e); }
   app.quit();
 }

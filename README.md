@@ -72,6 +72,7 @@ visualized as avatars at work on a shared office floor.
 - [Features](#features)
 - [Getting started](#getting-started)
 - [Architecture & project structure](./docs/ARCHITECTURE.md)
+- [Remote Mac UI over SSH](./docs/remote-setup.md)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [Telemetry](#telemetry)

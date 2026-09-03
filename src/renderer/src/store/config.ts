@@ -129,6 +129,8 @@ export interface HarnessConfig {
   providerBaseUrls?: Partial<Record<AgentProvider, string>>;
   /** Per-CLI-provider default model slug, used to pre-fill the model picker. */
   providerDefaultModels?: Partial<Record<AgentProvider, string>>;
+  /** Optional SSH remote helper target. Secrets remain in SSH, never config. */
+  remoteTarget?: { host: string; helperPath: string };
   /** Legacy single-webhook fields (mirrors src/main/config.ts, where they are
    *  deprecated in favour of `webhookTriggers` but still read until the server is
    *  rewired). Declared here so the surfaces that show them can stop widening this

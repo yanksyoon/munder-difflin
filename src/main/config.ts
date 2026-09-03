@@ -323,6 +323,8 @@ export interface HarnessConfig {
   providerBaseUrls?: Partial<Record<AgentProvider, string>>;
   /** Per-CLI-provider default model slug, used to pre-fill the model picker. */
   providerDefaultModels?: Partial<Record<AgentProvider, string>>;
+  /** Optional SSH remote helper target. Secrets remain in SSH, never config. */
+  remoteTarget?: { host: string; helperPath: string };
   /** Master toggle for the Slack → Michael's-queue integration. */
   slackEnabled?: boolean;
   /** Slack app signing secret (Basic Information → Signing Secret). Never logged. */

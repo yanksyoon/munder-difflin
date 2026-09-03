@@ -11,6 +11,8 @@ export type { ToolStatus } from '../shared/toolCatalog';
 import type { HeroPayload } from '../shared/heroPayload';
 export type { HeroPayload } from '../shared/heroPayload';
 import type { HookEvent } from '../shared/hookEvents';
+import type { RemoteMessage } from '../shared/remoteProtocol';
+export type { RemoteMessage } from '../shared/remoteProtocol';
 export type { HookEvent } from '../shared/hookEvents';
 import type { LocalSkill, CatalogSkill } from '../main/skills';
 export type { LocalSkill, CatalogSkill } from '../main/skills';
@@ -329,6 +331,8 @@ export interface HarnessConfig {
   providerBaseUrls?: Partial<Record<AgentProvider, string>>;
   /** Per-CLI-provider default model slug, used to pre-fill the model picker. */
   providerDefaultModels?: Partial<Record<AgentProvider, string>>;
+  /** Optional SSH remote helper target. Secrets remain in SSH, never config. */
+  remoteTarget?: { host: string; helperPath: string };
 }
 
 export interface MemoryStatus {
@@ -573,6 +577,28 @@ const api = {
    *  throw: a telemetry hiccup must not break sending a message. */
   trackMessageSent: (surface: 'terminal' | 'composer'): Promise<void> =>
     ipcRenderer.invoke('analytics:messageSent', surface).then(() => undefined, () => undefined),
+
+  // ─── SSH remote transport (separate from local PTY) ───────────────────────
+  remoteConnect: (options: { host: string; helperPath: string }): Promise<{ ok: boolean; hello?: unknown; error?: string }> =>
+    ipcRenderer.invoke('remote:connect', options),
+  remoteDisconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('remote:disconnect'),
+  remoteList: (): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:list'),
+  remoteStart: (payload: unknown): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:start', payload),
+  remoteAttach: (sessionId: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:attach', sessionId),
+  remoteInput: (sessionId: string, data: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:input', sessionId, data),
+  remoteResize: (sessionId: string, cols: number, rows: number): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:resize', sessionId, cols, rows),
+  remoteSignal: (sessionId: string, signal: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:signal', sessionId, signal),
+  remoteClose: (sessionId: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:close', sessionId),
+  onRemoteEvent: (cb: (message: RemoteMessage) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, message: RemoteMessage) => cb(message);
+    ipcRenderer.on('remote:event', listener);
+    return () => ipcRenderer.removeListener('remote:event', listener);
+  },
+  onRemoteStatus: (cb: (status: { connected: boolean; error?: string }) => void): (() => void) => {
+    const listener = (_e: IpcRendererEvent, status: { connected: boolean; error?: string }) => cb(status);
+    ipcRenderer.on('remote:status', listener);
+    return () => ipcRenderer.removeListener('remote:status', listener);
+  },
 
   // ─── PTY ─────────────────────────────────────────────────────────────────
   /** `cwd` in the result is the TILDE-EXPANDED absolute path main actually spawned

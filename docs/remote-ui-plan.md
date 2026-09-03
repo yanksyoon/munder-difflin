@@ -6,6 +6,26 @@ This is a design and implementation plan for running the Munder Difflin Electron
 Mac while the agent PTYs and hive run on a remote development host reached through SSH.
 It is intentionally separate from the upstream repository's local-only MVP.
 
+## Implemented first slice
+
+The `remote-ui-plan` branch now contains the first tested vertical slice:
+
+- `src/shared/remoteProtocol.ts`: versioned 4-byte length-prefixed JSON frames with
+  partial/coalesced input handling and envelope validation.
+- `src/remote/remoteHelper.ts`: a stdio helper that owns bounded `node-pty` sessions,
+  enforces an explicit remote root and executable allowlist, rejects shell interpreters,
+  and streams base64 PTY output.
+- `src/main/sshRemote.ts`: an OpenSSH transport with fixed helper argv, request
+  correlation, handshake timeout cleanup, and event delivery.
+- `src/main/index.ts` and `src/preload/index.ts`: typed `remote:*` IPC methods kept
+  separate from local `pty:*` handlers.
+- `RemoteConnectionSettings`: a Connections-panel surface for saving a target, connecting,
+  starting an allowlisted provider, viewing output, sending input, and closing sessions.
+- `docs/remote-setup.md`: host bootstrap, Mac setup, SSH rules, and smoke tests.
+
+This is a remote-terminal slice. Remote hive/roster/floor reconciliation, reconnect replay,
+remote file/git operations, and remote agent avatars remain follow-up work.
+
 ## Findings
 
 - The current product is an Electron desktop app. Its main process owns `node-pty`,
@@ -160,6 +180,8 @@ application a server.
 - Use a dedicated remote OS user or restricted account where feasible.
 - Allowlist helper path, provider commands, project roots, and environment variables.
 - Resolve and validate paths on the remote host; reject traversal and symlink escapes.
+- Treat path validation as policy, not an OS sandbox; use a least-privilege account and
+  container/chroot where race-resistant confinement is required.
 - Never expose the helper on `0.0.0.0`; the MVP should have no public listening port.
 - Authenticate every protocol request to a live SSH connection and bind sessions to the
   SSH principal. Add a per-connection nonce/session ID to prevent accidental cross-talk.
