@@ -19,6 +19,13 @@
 #   MD_BUILD_MAC=1   Build an (unsigned) .dmg instead of launching `npm run dev`.
 #   MD_SKIP_REMOTE=1 Skip the remote-helper install step.
 #
+# Security: values are never interpolated into the SSH command line. The SSH
+# target is validated to a strict alias (no leading `-`, no whitespace/metas),
+# remote options go after `--`, and MD_* values are transmitted via stdin encoded
+# as base64, then decoded by the remote `bash -s` payload. A malicious alias such
+# as `-oProxyCommand=...` or an override containing `;`, `$()`, backticks or
+# newlines is rejected up front.
+#
 set -euo pipefail
 
 ALIAS="${1:-${MD_ALIAS:-work}}"
@@ -29,6 +36,24 @@ ALLOW="${MD_ALLOW_COMMANDS:-claude,codex,agy,gemini,qwen,opencode,crush,pi,prime
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+# Strict alias: OpenSSH Host aliases are letters/digits plus . _ : @ -. A leading
+# dash would be parsed as an option (e.g. -oProxyCommand=...) — reject it.
+alias_re='^[A-Za-z0-9][A-Za-z0-9._:@-]*$'
+[[ "$ALIAS" =~ $alias_re ]] || die "Invalid SSH alias '$ALIAS'. Use the plain alias from your ~/.ssh/config (letters, digits, . _ : @ -); no leading dash."
+
+# Strict APP_DIR and remote override values: absolute-ish paths, no metacharacters.
+path_re='^[A-Za-z0-9_./~ -]+$'
+[[ "$APP_DIR" =~ $path_re ]] || die "Invalid MD_APP_DIR '$APP_DIR'"
+for v in MD_REMOTE_DIR MD_REMOTE_ROOT; do
+  val="${!v:-}"
+  if [ -n "$val" ]; then
+    [[ "$val" =~ $path_re ]] || die "Invalid $v='$val' (no ; \$() \` quotes or control chars)"
+  fi
+done
+# Allowlist must be a comma-separated list of plain command names.
+allow_re='^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$'
+[[ "$ALLOW" =~ $allow_re ]] || die "Invalid MD_ALLOW_COMMANDS '$ALLOW'"
 
 # ── 1. Mac prerequisites ────────────────────────────────────────────────────
 say "Checking Mac prerequisites"
@@ -42,7 +67,9 @@ xcode-select -p >/dev/null 2>&1 || die "Xcode Command Line Tools are required (x
 # ── 2. Existing SSH config alias ────────────────────────────────────────────
 say "Using your existing SSH config"
 [ -f "$HOME/.ssh/config" ] || die "No ~/.ssh/config found on this Mac"
-if grep -qE "^[[:space:]]*Host[[:space:]]+${ALIAS}([[:space:]]|$)" "$HOME/.ssh/config"; then
+# Grep with the alias in single quotes (fixed string), escaped via printf %q first.
+alias_grep="${ALIAS//./\\.}"
+if grep -qE "^[[:space:]]*Host[[:space:]]+${alias_grep}([[:space:]]|$)" "$HOME/.ssh/config"; then
   echo "  alias '$ALIAS' found in ~/.ssh/config"
 else
   echo "  NOTE: '$ALIAS' is not declared in ~/.ssh/config as a bare 'Host <alias>' entry."
@@ -50,12 +77,13 @@ else
 fi
 
 say "Verifying non-interactive SSH to '$ALIAS'"
-if ! ssh -o BatchMode=yes -o ConnectTimeout=10 -T "$ALIAS" true; then
+# `--` prevents anything after it being parsed as an ssh option.
+if ! ssh -o BatchMode=yes -o ConnectTimeout=10 -T -- "$ALIAS" true; then
   die "ssh -T $ALIAS true failed. The app cannot prompt for a password. Check your key/auth in ~/.ssh/config."
 fi
 echo "  ssh -T $ALIAS true -> OK (key-based, non-interactive)"
 
-REMOTE_HOME="$(ssh -o BatchMode=yes -T "$ALIAS" 'printf %s "$HOME"')" || die "Could not read remote HOME"
+REMOTE_HOME="$(ssh -o BatchMode=yes -T -- "$ALIAS" 'printf %s "$HOME"')" || die "Could not read remote HOME"
 REMOTE_DIR="${MD_REMOTE_DIR:-$REMOTE_HOME/munder-difflin}"
 REMOTE_ROOT="${MD_REMOTE_ROOT:-$REMOTE_HOME}"
 
@@ -64,34 +92,57 @@ if [ "${MD_SKIP_REMOTE:-0}" != "1" ]; then
   say "Installing the remote helper on '$ALIAS' ($REMOTE_DIR)"
   echo "  remote project root: $REMOTE_ROOT"
   echo "  provider allowlist:  $ALLOW"
-  ssh -o BatchMode=yes -T "$ALIAS" REMOTE_DIR="$REMOTE_DIR" REMOTE_ROOT="$REMOTE_ROOT" ALLOW="$ALLOW" FORK_URL="$FORK_URL" BRANCH="$BRANCH" 'bash -s' <<'REMOTE_EOF'
+  # Send only fixed `--` + `bash -s` on the command line; the variable payload
+  # travels encrypted on stdin as base64 (no shell interpolation anywhere).
+  PAYLOAD="$(base64 <<PAYLOAD_SRC
+REMOTE_DIR=$REMOTE_DIR
+REMOTE_ROOT=$REMOTE_ROOT
+ALLOW=$ALLOW
+FORK_URL=$FORK_URL
+BRANCH=$BRANCH
+PAYLOAD_SRC
+)"
+  ssh -o BatchMode=yes -T -- "$ALIAS" 'bash -s' <<REMOTE_EOF
 set -euo pipefail
-if [ ! -d "$REMOTE_DIR/.git" ]; then
-  git clone "$FORK_URL" "$REMOTE_DIR"
+mapfile -t LINES < <(base64 -d <<'B64'
+$PAYLOAD
+B64
+)
+declare -A V
+for _l in "\${LINES[@]}"; do
+  V[\${_l%%=*}]=\${_l#*=}
+done
+REMOTE_DIR=\${V[REMOTE_DIR]}
+REMOTE_ROOT=\${V[REMOTE_ROOT]}
+ALLOW=\${V[ALLOW]}
+FORK_URL=\${V[FORK_URL]}
+BRANCH=\${V[BRANCH]}
+[ -n "\$REMOTE_DIR" ] && [ -n "\$REMOTE_ROOT" ] && [ -n "\$ALLOW" ] || { echo "missing remote payload" >&2; exit 2; }
+if [ ! -d "\$REMOTE_DIR/.git" ]; then
+  git clone "\$FORK_URL" "\$REMOTE_DIR"
 fi
-cd "$REMOTE_DIR"
-git fetch --force origin "$BRANCH" >/dev/null
-git checkout -B "$BRANCH" "origin/$BRANCH" >/dev/null
-remote_node="$(command -v node || true)"
-[ -n "$remote_node" ] || { echo "remote node not found" >&2; exit 2; }
-echo "  remote node: $remote_node"
+cd "\$REMOTE_DIR"
+git fetch --force origin "\$BRANCH" >/dev/null
+git checkout -B "\$BRANCH" "origin/\$BRANCH" >/dev/null
+remote_node="\$(command -v node || true)"
+[ -n "\$remote_node" ] || { echo "remote node not found" >&2; exit 2; }
+echo "  remote node: \$remote_node"
 if [ ! -d node_modules ] || ! npm ls --depth=0 >/dev/null 2>&1; then
   npm ci --ignore-scripts
 fi
 npm rebuild node-pty >/dev/null 2>&1 || echo "  warning: npm rebuild node-pty failed (check g++/make/python3)" >&2
 npm run build:remote >/dev/null
-BIN_DIR="$HOME/bin"
-mkdir -p "$BIN_DIR"
-ROOT_EXPANDED="$(printf '%s' "$REMOTE_ROOT")"
-cat > "$BIN_DIR/munder-remote" <<EOF
+BIN_DIR="\$HOME/bin"
+mkdir -p "\$BIN_DIR"
+cat > "\$BIN_DIR/munder-remote" <<'WRAP'
 #!/bin/sh
 set -eu
-export MUNDER_REMOTE_ROOT="$ROOT_EXPANDED"
-export MUNDER_REMOTE_ALLOW_COMMANDS="$ALLOW"
-exec "$remote_node" "$REMOTE_DIR/tools/remote-helper-launcher.cjs"
-EOF
-chmod 700 "$BIN_DIR/munder-remote"
-echo "  helper wrapper: $BIN_DIR/munder-remote"
+export MUNDER_REMOTE_ROOT='\$REMOTE_ROOT'
+export MUNDER_REMOTE_ALLOW_COMMANDS='\$ALLOW'
+exec '\$remote_node' '\$REMOTE_DIR/tools/remote-helper-launcher.cjs'
+WRAP
+chmod 700 "\$BIN_DIR/munder-remote"
+echo "  helper wrapper: \$BIN_DIR/munder-remote"
 REMOTE_EOF
   [ $? -eq 0 ] || die "Remote helper install failed (rc=$?)"
 else

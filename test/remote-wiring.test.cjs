@@ -29,6 +29,18 @@ test('prime-agent is a recognized provider and an allowed remote command', () =>
   assert.ok(AGENT_PROVIDER_PRESETS.some((p) => p.id === 'prime-agent'));
 });
 
+
+test('the Mac setup script validates the alias and transports remote values safely', () => {
+  const setup = read('tools/mac-remote-setup.sh');
+  assert.match(setup, /alias_re='\^\[A-Za-z0-9\]\[A-Za-z0-9._:@-\]\*\$'/);
+  assert.match(setup, /Invalid SSH alias/);
+  assert.match(setup, /Invalid \$v=/, 'remote override validation uses a per-variable die');
+  assert.match(setup, /ssh -o BatchMode=yes -o ConnectTimeout=10 -T --/, 'ssh options are terminated with --');
+  assert.match(setup, /base64 -d/, 'payload travels encoded via stdin');
+  assert.match(setup, /<<'WRAP'/, 'wrapper is written via a quoted heredoc');
+  assert.doesNotMatch(setup, /ssh -[^ ]* "\$ALIAS"/, 'alias is never passed as an option');
+});
+
 test('remote setup documents the actual SSH and host bootstrap contract', () => {
   const docs = read('docs/remote-setup.md');
   assert.match(docs, /npm rebuild node-pty/);
