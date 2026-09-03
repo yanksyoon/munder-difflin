@@ -36,7 +36,10 @@ test('the Mac setup script validates the alias and transports remote values safe
   assert.match(setup, /Invalid SSH alias/);
   assert.match(setup, /Invalid \$v=/, 'remote override validation uses a per-variable die');
   assert.match(setup, /ssh -o BatchMode=yes -o ConnectTimeout=10 -T --/, 'ssh options are terminated with --');
-  assert.match(setup, /base64 -d/, 'payload travels encoded via stdin');
+  assert.match(setup, /base64 -d/, 'payload is decoded remotely');
+  assert.equal(setup.includes("'bash' -s"), false, 'remote script is not run via -s with shared stdin');
+  assert.match(setup, /PAYLOAD_B64=.* bash -c/, 'payload is passed as an env var to bash -c');
+  assert.match(setup, /printf %q/, 'remote script is shell-quoted before ssh');
   assert.match(setup, /printf 'export MUNDER_REMOTE_ROOT=%q/, 'wrapper is written with printf %q (decoded values, quoted)');
   assert.doesNotMatch(setup, /ssh -[^ ]* "\$ALIAS"/, 'alias is never passed as an option');
 });

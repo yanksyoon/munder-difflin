@@ -94,7 +94,7 @@ if [ "${MD_SKIP_REMOTE:-0}" != "1" ]; then
   echo "  provider allowlist:  $ALLOW"
   # Send only fixed `--` + `bash -s` on the command line; the variable payload
   # travels encrypted on stdin as base64 (no shell interpolation anywhere).
-  PAYLOAD="$(base64 <<PAYLOAD_SRC
+  PAYLOAD_B64="$(base64 <<PAYLOAD_SRC
 REMOTE_DIR=$REMOTE_DIR
 REMOTE_ROOT=$REMOTE_ROOT
 ALLOW=$ALLOW
@@ -102,16 +102,16 @@ FORK_URL=$FORK_URL
 BRANCH=$BRANCH
 PAYLOAD_SRC
 )"
-  ssh -o BatchMode=yes -T -- "$ALIAS" 'bash -s' <<REMOTE_EOF
+  # Build the remote script as text, then pass it as a `bash -c` ARGUMENT via
+  # printf %q. stdin is never used by the remote command, and the payload is an
+  # environment variable (single-line base64, safe alphabet). Nothing from the
+  # local shell is interpolated into command text except the %q-quoted script.
+  REMOTE_SCRIPT="$(cat <<'REMOTE_SCRIPT'
 set -euo pipefail
-# Bash3-safe payload decode: read all base64 lines, join, decode once.
-PAYLOAD_B64=""
-while IFS= read -r _l || [ -n "$_l" ]; do
-  PAYLOAD_B64="${PAYLOAD_B64}${_l}"
-done
+# Decode the embedded payload env var (single line, safe alphabet).
 PAYLOAD="$(printf '%s' "$PAYLOAD_B64" | base64 -d)"
-# Payload is a sequence of lines `KEY=VALUE`. Parse positionally without
-# associative arrays (macOS /bin/bash 3.2 has none).
+# Parse KEY=VALUE lines positionally (no Bash-4 associative arrays; works on
+# macOS /bin/bash 3.2 and Ubuntu).
 REMOTE_DIR=""; REMOTE_ROOT=""; ALLOW=""; FORK_URL=""; BRANCH=""
 IFS='
 '
@@ -144,8 +144,7 @@ npm rebuild node-pty >/dev/null 2>&1 || echo "  warning: npm rebuild node-pty fa
 npm run build:remote >/dev/null
 BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
-# Write the wrapper with printf %q so decoded values are shell-quoted, never
-# raw-interpolated and never literal.
+# Render the wrapper with printf %q: decoded values, shell-quoted, never literal.
 {
   printf '#!/bin/sh\nset -eu\n'
   printf 'export MUNDER_REMOTE_ROOT=%q\n' "$REMOTE_ROOT"
@@ -154,7 +153,10 @@ mkdir -p "$BIN_DIR"
 } > "$BIN_DIR/munder-remote"
 chmod 700 "$BIN_DIR/munder-remote"
 echo "  helper wrapper: $BIN_DIR/munder-remote"
-REMOTE_EOF
+REMOTE_SCRIPT
+)"
+  QUOTED_SCRIPT="$(printf '%q' "$REMOTE_SCRIPT")"
+  ssh -o BatchMode=yes -T -- "$ALIAS" "PAYLOAD_B64='$PAYLOAD_B64' bash -c $QUOTED_SCRIPT"
   [ $? -eq 0 ] || die "Remote helper install failed (rc=$?)"
 else
   say "Skipping remote helper install (MD_SKIP_REMOTE=1)"
