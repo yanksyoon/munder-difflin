@@ -84,8 +84,16 @@ fi
 echo "  ssh -T $ALIAS true -> OK (key-based, non-interactive)"
 
 REMOTE_HOME="$(ssh -o BatchMode=yes -T -- "$ALIAS" 'printf %s "$HOME"')" || die "Could not read remote HOME"
+# Validate the DERIVED values immediately, before they are embedded into the
+# remote script. HOME comes from the SSH server, so it is untrusted input:
+# reject spaces and any metacharacter rather than storing an injectable value.
+case "$REMOTE_HOME" in
+  *[!A-Za-z0-9_./~-]*) die "Unsafe remote HOME '$REMOTE_HOME' (alphanumerics, / . _ ~ - only)" ;;
+esac
 REMOTE_DIR="${MD_REMOTE_DIR:-$REMOTE_HOME/munder-difflin}"
 REMOTE_ROOT="${MD_REMOTE_ROOT:-$REMOTE_HOME}"
+case "$REMOTE_DIR" in *[!A-Za-z0-9_./~-]*) die "Unsafe MD_REMOTE_DIR '$REMOTE_DIR' (no spaces or metacharacters)" ;; esac
+case "$REMOTE_ROOT" in *[!A-Za-z0-9_./~-]*) die "Unsafe MD_REMOTE_ROOT '$REMOTE_ROOT' (no spaces or metacharacters)" ;; esac
 
 # ── 3. Install/refresh the remote helper ─────────────────────────────────────
 if [ "${MD_SKIP_REMOTE:-0}" != "1" ]; then

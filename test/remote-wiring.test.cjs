@@ -46,6 +46,15 @@ test('the Mac setup script validates the alias and transports remote values safe
   assert.doesNotMatch(setup, /ssh -[^ ]* "\$ALIAS"/, 'alias is never passed as an option');
 });
 
+test('the Mac setup script rejects unsafe remote HOME and derived paths', () => {
+  const setup = read('tools/mac-remote-setup.sh');
+  assert.match(setup, /Unsafe remote HOME/);
+  assert.match(setup, /case "\$REMOTE_HOME" in/, 'remote HOME is validated before use');
+  assert.match(setup, /Unsafe MD_REMOTE_DIR/);
+  assert.match(setup, /Unsafe MD_REMOTE_ROOT/);
+  assert.doesNotMatch(setup, /REMOTE_HOME=.*unquoted/, '');
+});
+
 test('remote setup documents the actual SSH and host bootstrap contract', () => {
   const docs = read('docs/remote-setup.md');
   assert.match(docs, /npm rebuild node-pty/);
