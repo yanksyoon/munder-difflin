@@ -283,3 +283,45 @@ test('git browsing does not execute repository-configured hooks', async (t) => {
   // The malicious fsmonitor hook must NOT have run.
   assert.equal(fs.existsSync(marker), false, 'git browsing must not execute repo hooks');
 });
+
+test('git browsing does not execute repository-configured clean filters', async (t) => {
+  const { RemoteHelper } = loadTs('src/remote/remoteHelper.ts');
+  const { FrameDecoder } = loadTs('src/shared/remoteProtocol.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-remote-filter-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'filtered');
+  const { execFileSync } = require('node:child_process');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: root });
+  fs.writeFileSync(path.join(root, 'a.txt'), 'hello', 'utf8');
+  fs.writeFileSync(path.join(root, '.gitattributes'), '*.txt filter=evil\n', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-qm', 'init'], { cwd: root });
+  const hook = path.join(root, 'evil-filter.sh');
+  fs.writeFileSync(hook, `#!/bin/sh\nprintf x > "${marker}"\ncat\n`, 'utf8');
+  fs.chmodSync(hook, 0o755);
+  execFileSync('git', ['config', 'filter.evil.clean', hook], { cwd: root });
+  execFileSync('git', ['config', 'filter.evil.required', 'true'], { cwd: root });
+
+  const frames = [];
+  const output = new (require('node:stream').PassThrough)();
+  output._write = function (chunk, _enc, cb) { this.emit('frame', chunk); cb(); };
+  output.on('frame', (chunk) => frames.push(chunk));
+  const helper = new RemoteHelper({ root, commands: ['printf'], output });
+  const dec = new FrameDecoder();
+  const capture = (requestId) => new Promise((resolve) => {
+    const timer = setInterval(() => {
+      for (const frame of frames) {
+        for (const message of dec.push(frame)) {
+          if (message.requestId === requestId) { clearInterval(timer); resolve(message); return; }
+        }
+      }
+    }, 10);
+  });
+  if (fs.existsSync(marker)) fs.unlinkSync(marker);
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'g', op: 'git_status', payload: {} });
+  const git = await capture('g');
+  assert.equal(git.op, 'git_status');
+  assert.equal(fs.existsSync(marker), false, 'git browsing must not execute repo clean filters');
+});

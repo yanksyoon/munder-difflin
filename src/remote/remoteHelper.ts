@@ -1,7 +1,7 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import {
   FrameDecoder, encodeFrame, PROTOCOL_VERSION, REQUIRED_REMOTE_CAPABILITIES, type RemoteMessage
@@ -199,20 +199,36 @@ export class RemoteHelper {
 
   private gitRun(request: RemoteMessage, op: 'git_status' | 'git_log', cwdRel: string, cwdAbs: string): void {
     try {
-      // Read-only, hook-free git: a repository under the root must never be able to
-      // execute configured hooks (core.fsmonitor, filters, …) when the user merely
-      // browses it. `-c core.fsmonitor=false` disables the fsmonitor hook; the
-      // `-c …` pairs below are inert for our fixed subcommands (status/log) but
-      // serve as a safety net for any config-extension surface; `--no-optional-locks`
-      // stops Git taking advisory locks. Environment is sanitized (no unsafe GIT_*).
+      // Read-only, execution-free git. A repository under the root must never be
+      // able to run code when the user merely browses it:
+      //  - core.fsmonitor and hooks are disabled;
+      //  - repo-local `filter.<name>.{clean,smudge,process}` drivers are discovered
+      //    with a SAFE `git config` read (config reads never execute filters) and
+      //    then neutralized one by one via `-c` (empty command + non-required), so
+      //    `.gitattributes`-referenced evil filters cannot run;
+      //  - pager is disabled and optional locks are skipped;
+      //  - GIT_* environment is sanitized.
+      const filterNames = new Set<string>();
+      try {
+        const configText = execFileSync('git', ['config', '--local', '--get-regexp', '^filter\..+\.(clean|smudge|process)$'], {
+          cwd: cwdAbs, encoding: 'utf8', timeout: 5000, maxBuffer: 128 * 1024, windowsHide: true
+        });
+        for (const line of configText.split(/\r?\n/)) {
+          const key = line.slice(0, line.indexOf(' '));
+          const match = /^filter\.(.+?)\.(clean|smudge|process)$/.exec(key);
+          if (match) filterNames.add(match[1]);
+        }
+      } catch { /* no repo-local filter config; nothing to neutralize */ }
       const args = [
         '-c', 'core.fsmonitor=false',
         '-c', 'core.hooksPath=/dev/null',
-        '-c', 'filter.lfs.smudge=cat',
-        '-c', 'filter.lfs.clean=cat',
-        '--no-optional-locks',
-        ...(op === 'git_status' ? ['status', '--short', '--branch'] : ['log', '--oneline', '-n', '20'])
+        '-c', 'core.pager=cat',
+        '--no-optional-locks'
       ];
+      for (const name of filterNames) {
+        args.push('-c', `filter.${name}.clean=`, '-c', `filter.${name}.smudge=`, '-c', `filter.${name}.process=`, '-c', `filter.${name}.required=false`);
+      }
+      args.push(...(op === 'git_status' ? ['status', '--short', '--branch'] : ['log', '--oneline', '-n', '20']));
       const gitEnv = { ...process.env };
       delete gitEnv.GIT_DIR;
       delete gitEnv.GIT_WORK_TREE;
