@@ -138,6 +138,7 @@ export class RemoteHelper {
           this.stop();
           process.stderr.write(`[remote-helper] ${error instanceof Error ? error.message : String(error)}\n`);
           process.exitCode = 1;
+          try { process.stdin.destroy(); } catch { /* already closed */ }
         }
       });
       proc.onExit(({ exitCode, signal }) => {

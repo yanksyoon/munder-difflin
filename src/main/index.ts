@@ -2364,7 +2364,10 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
   // navigation must NOT flip readiness off (the renderer only drains on mount,
   // so a later deep link would otherwise queue and sit until a full reload).
   win.webContents.on('did-start-navigation', (details) => {
-    if (details.isMainFrame) rendererReadyForHires = false;
+    if (details.isMainFrame) {
+      rendererReadyForHires = false;
+      if (remoteOwner === wc) closeRemoteTransport();
+    }
   });
 
   if (isDev && process.env.ELECTRON_RENDERER_URL) {
@@ -2375,6 +2378,7 @@ function createWindow(opts: { floor?: boolean } = {}): BrowserWindow {
 
   win.on('closed', () => {
     allWindows.delete(win);
+    if (remoteOwner === wc) closeRemoteTransport();
     // A closed floor must not leave its terminals running headless. (Natural
     // onExit teardown — archive + worktree cleanup — still runs per PTY.)
     if (isFloor) { try { ptyManager.killByOwner(wc); } catch { /* best-effort */ } }

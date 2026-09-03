@@ -51,10 +51,14 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
       if (message.op === 'output') {
         const data = (message.payload as { data?: unknown } | undefined)?.data;
         if (typeof data === 'string') {
-          setOutput((prev) => ({
-            ...prev,
-            [message.sessionId!]: ((prev[message.sessionId!] ?? '') + decodeBase64(data, decoders.current.get(message.sessionId!) ?? (() => { const decoder = new TextDecoder(); decoders.current.set(message.sessionId!, decoder); return decoder; })())).slice(-1_000_000)
-          }));
+          try {
+            const decoder = decoders.current.get(message.sessionId!) ?? (() => { const next = new TextDecoder(); decoders.current.set(message.sessionId!, next); return next; })();
+            const text = decodeBase64(data, decoder);
+            setOutput((prev) => ({
+              ...prev,
+              [message.sessionId!]: ((prev[message.sessionId!] ?? '') + text).slice(-1_000_000)
+            }));
+          } catch { setNote('invalid remote output'); }
         }
       } else if (message.op === 'exit') {
         const decoder = decoders.current.get(message.sessionId);

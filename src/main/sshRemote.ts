@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { isAbsolute } from 'node:path';
 import {
-  FrameDecoder, encodeFrame, PROTOCOL_VERSION, REQUIRED_REMOTE_CAPABILITIES, RemoteProtocolError,
+  FrameDecoder, encodeFrame, PROTOCOL_VERSION, REQUIRED_REMOTE_CAPABILITIES, MAX_FRAME_BYTES, RemoteProtocolError,
   type RemoteMessage, type RemoteOperation
 } from '../shared/remoteProtocol';
 
@@ -40,10 +40,11 @@ function validateOptions(options: SshRemoteOptions): void {
 
 export class SshRemoteTransport {
   private child: RemoteChild | null = null;
-  private readonly decoder = new FrameDecoder();
-  private readonly pending = new Map<string, { op: string; resolve: (message: RemoteMessage) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
+  private decoder = new FrameDecoder();
+  private readonly pending = new Map<string, { op: string; sessionId?: string; resolve: (message: RemoteMessage) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private readonly events = new Set<RemoteEventHandler>();
   private readonly closeEvents = new Set<(error?: Error) => void>();
+  private readonly lastEventSeq = new Map<string, number>();
   private nextRequest = 0;
   private closed = false;
 
@@ -54,6 +55,7 @@ export class SshRemoteTransport {
   connect(): Promise<RemoteMessage> {
     if (this.child) return Promise.reject(new Error('SSH transport is already connected'));
     this.closed = false;
+    this.decoder = new FrameDecoder();
     const spawn = this.options.spawn ?? ((file, args, spawnOptions) => spawnProcess(file, args, spawnOptions) as unknown as RemoteChild);
     let child: RemoteChild;
     try {
@@ -110,12 +112,13 @@ export class SshRemoteTransport {
       }, this.options.requestTimeoutMs ?? 15_000);
       // Register before writing: a peer can answer synchronously in the same
       // event-loop turn (and a real helper can be faster than the next tick).
-      this.pending.set(requestId, { op, resolve, reject, timer });
+      this.pending.set(requestId, { op, sessionId, resolve, reject, timer });
       try {
         if (!child.stdin.write(encodeFrame(message))) throw new Error('SSH stdin backpressure');
       } catch (error) {
         this.pending.delete(requestId);
         clearTimeout(timer);
+        this.close();
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -135,6 +138,7 @@ export class SshRemoteTransport {
     const child = this.child;
     this.closed = true;
     this.child = null;
+    this.lastEventSeq.clear();
     this.failPending(new Error('SSH transport closed'));
     if (!child) return;
     try { child.stdin.end(); } catch { /* already closed */ }
@@ -149,6 +153,10 @@ export class SshRemoteTransport {
       if (!item) return;
       this.pending.delete(id);
       clearTimeout(item.timer);
+      if (item.sessionId !== undefined && message.sessionId !== item.sessionId) {
+        item.reject(new Error('unexpected remote session in response'));
+        return;
+      }
       if (message.op === 'error') {
         const payload = message.payload as { message?: unknown } | undefined;
         item.reject(new Error(typeof payload?.message === 'string' ? payload.message : 'remote request failed'));
@@ -159,12 +167,33 @@ export class SshRemoteTransport {
       }
       return;
     }
+    if (message.type !== 'event') {
+      this.fail(new Error('unexpected remote message direction'));
+      return;
+    }
+    if (message.sessionId && message.seq !== undefined) {
+      const previous = this.lastEventSeq.get(message.sessionId);
+      if (previous !== undefined && message.seq <= previous) return;
+      this.lastEventSeq.set(message.sessionId, message.seq);
+    }
+    if (message.op === 'output') {
+      const data = (message.payload as { data?: unknown } | undefined)?.data;
+      if (typeof data !== 'string' || data.length > MAX_FRAME_BYTES || data.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) {
+        this.fail(new Error('invalid remote output')); return;
+      }
+    }
     for (const callback of this.events) callback(message);
   }
 
   private fail(error: Error): void {
+    if (this.closed) return;
+    const child = this.child;
+    this.closed = true;
+    this.child = null;
+    this.lastEventSeq.clear();
     this.failPending(error);
-    try { this.child?.kill(); } catch { /* already closed */ }
+    try { child?.stdin.end(); } catch { /* already closed */ }
+    try { child?.kill(); } catch { /* already closed */ }
   }
 
   private failPending(error: Error): void {

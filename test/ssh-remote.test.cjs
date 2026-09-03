@@ -76,3 +76,16 @@ test('SSH transport rejects a helper with an incompatible handshake', async () =
   const transport = new SshRemoteTransport({ host: 'work', helperPath: '/opt/munder/remote-helper.js', spawn: () => child });
   await assert.rejects(transport.connect(), /protocol\/capability mismatch/);
 });
+
+test('SSH transport rejects a correlated response for the wrong session', async () => {
+  const child = fakeChild((proc, message) => {
+    const payload = message.op === 'hello'
+      ? { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close'] }
+      : {};
+    proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, sessionId: message.op === 'hello' ? undefined : 'other', op: message.op === 'hello' ? 'hello_ack' : message.op, payload }));
+  });
+  const transport = new SshRemoteTransport({ host: 'work', helperPath: '/opt/munder/remote-helper.js', spawn: () => child });
+  await transport.connect();
+  await assert.rejects(transport.request('input', { data: 'x' }, 's1'), /unexpected remote session/);
+  transport.close();
+});
