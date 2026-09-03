@@ -66,6 +66,11 @@ test('RemoteBackend maps sessions to logical ids and replays snapshot', async ()
   assert.deepEqual(exits, [['remote:s1', 0]]);
   assert.deepEqual(backend.sessionsList(), []);
 
+  await backend.fsList('.');
+  assert.deepEqual(transport.requests[transport.requests.length - 1], { op: 'fs_list', payload: { path: '.' }, sessionId: undefined });
+  await backend.gitLog();
+  assert.deepEqual(transport.requests[transport.requests.length - 1], { op: 'git_log', payload: {}, sessionId: undefined });
+
   backend.disconnect();
   assert.equal(transport.closed, true);
 });

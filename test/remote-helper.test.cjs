@@ -49,7 +49,7 @@ test('remote helper starts an allowlisted command and streams output', async (t)
   child.stdin.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'h1', op: 'hello', payload: {} }));
   const [hello] = await helloWait;
   assert.equal(hello.op, 'hello_ack');
-  assert.deepEqual(hello.payload.capabilities, ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot']);
+  assert.deepEqual(hello.payload.capabilities, ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot', 'fs_list', 'fs_read', 'git_status', 'git_log']);
   assert.equal(Object.hasOwn(hello.payload, 'root'), false, 'absolute host paths stay out of handshake');
 
   const sessionWait = waitForMessages(decoder, child, [
@@ -152,4 +152,54 @@ test('snapshot replay is byte-bounded, never exceeds the frame, and reports evic
   assert.doesNotThrow(() => encodeFrame(snapshot), 'snapshot must encode without frame-too-large');
   assert.ok(payload.startSeq > 0, `evicted history must surface a startSeq gap, got ${payload.startSeq}`);
   assert.equal(payload.truncated, true, 'evicted history must be flagged truncated');
+});
+
+test('remote helper lists directories, reads files, and reports git status within root', async (t) => {
+  const { RemoteHelper } = loadTs('src/remote/remoteHelper.ts');
+  const { FrameDecoder } = loadTs('src/shared/remoteProtocol.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-remote-fs-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'hello.txt'), 'hello remote', 'utf8');
+  fs.mkdirSync(path.join(root, 'sub'));
+  const { execFileSync } = require('node:child_process');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: root });
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-qm', 'init'], { cwd: root });
+  const frames = [];
+  const output = new (require('node:stream').PassThrough)();
+  output._write = function (chunk, _enc, cb) { this.emit('frame', chunk); cb(); };
+  output.on('frame', (chunk) => frames.push(chunk));
+  const helper = new RemoteHelper({ root, commands: ['printf'], output });
+  const dec = new FrameDecoder();
+
+  const capture = (requestId) => new Promise((resolve) => {
+    const timer = setInterval(() => {
+      for (const frame of frames) {
+        for (const message of dec.push(frame)) {
+          if (message.requestId === requestId) { clearInterval(timer); resolve(message); return; }
+        }
+      }
+    }, 10);
+  });
+
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'l', op: 'fs_list', payload: {} });
+  const listing = await capture('l');
+  assert.equal(listing.op, 'fs_list');
+  const names = listing.payload.entries.map((e) => e.name);
+  assert.ok(names.includes('hello.txt') && names.includes('sub'));
+
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'r', op: 'fs_read', payload: { path: 'hello.txt' } });
+  const read = await capture('r');
+  assert.equal(read.payload.content, 'hello remote');
+
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'x', op: 'fs_read', payload: { path: '../secret.txt' } });
+  const outside = await capture('x');
+  assert.equal(outside.op, 'error');
+
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'g', op: 'git_status', payload: {} });
+  const git = await capture('g');
+  assert.equal(git.op, 'git_status');
+  assert.equal(typeof git.payload.output, 'string');
 });

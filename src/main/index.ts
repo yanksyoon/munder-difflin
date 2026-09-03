@@ -2586,6 +2586,30 @@ ipcMain.handle('remote:close', async (evt, sessionId: unknown) => {
   try { await backend.close(remoteRawSessionId(sessionId)); return { ok: true, sessions: backend.sessionsList() }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
+ipcMain.handle('remote:fsList', async (evt, path: unknown) => {
+  const backend = remoteFor(evt.sender);
+  if (!backend) return { ok: false, error: 'remote transport is not connected' };
+  try { return { ok: true, response: await backend.fsList(typeof path === 'string' && path ? path : undefined) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:fsRead', async (evt, path: unknown) => {
+  const backend = remoteFor(evt.sender);
+  if (!backend || typeof path !== 'string' || !path) return { ok: false, error: 'invalid remote path' };
+  try { return { ok: true, response: await backend.fsRead(path) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:gitStatus', async (evt, path: unknown) => {
+  const backend = remoteFor(evt.sender);
+  if (!backend) return { ok: false, error: 'remote transport is not connected' };
+  try { return { ok: true, response: await backend.gitStatus(typeof path === 'string' && path ? path : undefined) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:gitLog', async (evt, path: unknown) => {
+  const backend = remoteFor(evt.sender);
+  if (!backend) return { ok: false, error: 'remote transport is not connected' };
+  try { return { ok: true, response: await backend.gitLog(typeof path === 'string' && path ? path : undefined) }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
 
 // ─── IPC: pty lifecycle ─────────────────────────────────────────────────────
 /** Codex stores its rollout transcripts under a PER-AGENT CODEX_HOME

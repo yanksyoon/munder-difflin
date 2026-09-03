@@ -599,6 +599,10 @@ const api = {
   remoteResize: (sessionId: string, cols: number, rows: number): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('remote:resize', sessionId, cols, rows),
   remoteSignal: (sessionId: string, signal: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('remote:signal', sessionId, signal),
   remoteClose: (sessionId: string): Promise<{ ok: boolean; sessions?: RemoteSessionInfo[]; error?: string }> => ipcRenderer.invoke('remote:close', sessionId),
+  remoteFsList: (path?: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:fsList', path),
+  remoteFsRead: (path: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:fsRead', path),
+  remoteGitStatus: (path?: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:gitStatus', path),
+  remoteGitLog: (path?: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:gitLog', path),
   onRemoteEvent: (cb: (message: RemoteMessage) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, message: RemoteMessage) => cb(message);
     ipcRenderer.on('remote:event', listener);

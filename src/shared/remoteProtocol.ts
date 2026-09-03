@@ -2,12 +2,13 @@
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
-export const REQUIRED_REMOTE_CAPABILITIES = ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] as const;
+export const REQUIRED_REMOTE_CAPABILITIES = ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot', 'fs_list', 'fs_read', 'git_status', 'git_log'] as const;
 
 export type RemoteMessageType = 'request' | 'response' | 'event';
 export type RemoteOperation =
   | 'hello' | 'hello_ack' | 'list' | 'start' | 'attach' | 'input' | 'resize'
   | 'signal' | 'close' | 'snapshot' | 'output' | 'exit' | 'hook_event'
+  | 'fs_list' | 'fs_read' | 'git_status' | 'git_log'
   | 'ping' | 'pong' | 'error';
 
 export interface RemoteMessage {
@@ -27,6 +28,7 @@ const EVENT_OPS = new Set<RemoteOperation>(['output', 'exit', 'hook_event']);
 const OPERATIONS = new Set<RemoteOperation>([
   'hello', 'hello_ack', 'list', 'start', 'attach', 'input', 'resize',
   'signal', 'close', 'snapshot', 'output', 'exit', 'hook_event',
+  'fs_list', 'fs_read', 'git_status', 'git_log',
   'ping', 'pong', 'error'
 ]);
 

@@ -39,6 +39,11 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
   const [output, setOutput] = useState<Record<string, string>>({});
   const [connected, setConnected] = useState(false);
   const [note, setNote] = useState('');
+  const [browsePath, setBrowsePath] = useState('/home/ubuntu');
+  const [browseEntries, setBrowseEntries] = useState<{ name: string; directory: boolean }[]>([]);
+  const [filePreview, setFilePreview] = useState('');
+  const [gitOutput, setGitOutput] = useState('');
+  const [capabilities, setCapabilities] = useState<string[]>([]);
   const decoders = useRef(new Map<string, TextDecoder>());
   const lastSeq = useRef(new Map<string, number>());
 
@@ -109,6 +114,7 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
     const result = await window.cth.remoteConnect({ host: host.trim(), helperPath: helperPath.trim() });
     if (!result.ok) { setConnected(false); setNote(result.error ?? 'connection failed'); return; }
     setConnected(true);
+    setCapabilities(((result.hello as { capabilities?: unknown } | undefined)?.capabilities as string[] | undefined) ?? []);
     try { await window.cth.updateConfig({ remoteTarget: { host: host.trim(), helperPath: helperPath.trim() } }); }
     catch { /* connection remains usable; persistence can be retried next time */ }
     setSessions(result.sessions ?? []);
@@ -141,6 +147,30 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
     if (selected === sessionId) setSelected(null);
   };
 
+  const browse = async (path?: string): Promise<void> => {
+    const next = path ?? browsePath;
+    const result = await window.cth.remoteFsList(next === '/home/ubuntu' ? undefined : next);
+    if (!result.ok || !result.response) { setNote(result.error ?? 'remote list failed'); return; }
+    const payload = result.response.payload as { path?: string; entries?: { name: string; directory: boolean }[] } | undefined;
+    setBrowsePath(payload?.path ?? next);
+    setBrowseEntries(payload?.entries ?? []);
+    setFilePreview('');
+  };
+
+  const readFile = async (name: string): Promise<void> => {
+    const result = await window.cth.remoteFsRead(`${browsePath}/${name}`);
+    if (!result.ok || !result.response) { setNote(result.error ?? 'remote read failed'); return; }
+    const payload = result.response.payload as { content?: string } | undefined;
+    setFilePreview(payload?.content ?? '');
+  };
+
+  const runGit = async (kind: 'status' | 'log'): Promise<void> => {
+    const result = kind === 'status' ? await window.cth.remoteGitStatus() : await window.cth.remoteGitLog();
+    if (!result.ok || !result.response) { setNote(result.error ?? 'git failed'); return; }
+    const payload = result.response.payload as { output?: string } | undefined;
+    setGitOutput(payload?.output ?? '');
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div>
@@ -159,6 +189,29 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
         <span style={{ fontSize: 12, color: connected ? 'var(--cth-mint)' : 'var(--cth-ink-500)', alignSelf: 'center' }}>{connected ? 'connected' : 'not connected'}</span>
       </div>
       {connected && <>
+        <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
+        {capabilities.length > 0 && <div style={{ fontSize: 11, color: 'var(--cth-ink-500)' }}>capabilities: {capabilities.join(', ')}</div>}
+        <div style={{ ...labelStyle, marginBottom: 2 }}>Remote project browser</div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <input value={browsePath} onChange={(e) => setBrowsePath(e.target.value)} style={inputStyle} placeholder="remote path under root" />
+          <PixelButton variant="secondary" size="sm" onClick={() => void browse()}>Open</PixelButton>
+        </div>
+        {browseEntries.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, maxHeight: 180, overflow: 'auto', background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)', padding: 6 }}>
+            {browseEntries.map((entry) => (
+              <div key={entry.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                <span style={{ color: 'var(--cth-ink-500)' }}>{entry.directory ? '📁' : '📄'}</span>
+                <button type="button" onClick={() => { if (entry.directory) void browse(`${browsePath}/${entry.name}`); else void readFile(entry.name); }} style={{ flex: 1, textAlign: 'left', border: 0, background: 'transparent', color: 'var(--cth-ink-900)', cursor: 'pointer', fontFamily: 'var(--cth-font-mono)' }}>{entry.name}</button>
+              </div>
+            ))}
+          </div>
+        )}
+        {filePreview && <pre style={{ margin: 0, padding: 8, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', background: 'var(--cth-paper-200)', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-mono)', fontSize: 12 }}>{filePreview}</pre>}
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <PixelButton variant="ghost" size="sm" onClick={() => void runGit('status')}>git status</PixelButton>
+          <PixelButton variant="ghost" size="sm" onClick={() => void runGit('log')}>git log</PixelButton>
+        </div>
+        {gitOutput && <pre style={{ margin: 0, padding: 8, maxHeight: 160, overflow: 'auto', whiteSpace: 'pre-wrap', background: 'var(--cth-paper-200)', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-mono)', fontSize: 12 }}>{gitOutput}</pre>}
         <div style={{ height: 1, background: 'var(--cth-ink-300)' }} />
         <div style={{ ...labelStyle, marginBottom: 2 }}>Start remote agent</div>
         <label style={labelStyle}>Project directory<input value={cwd} onChange={(e) => setCwd(e.target.value)} style={inputStyle} /></label>

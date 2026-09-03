@@ -23,11 +23,12 @@ The `remote-ui-plan` branch now contains the first tested vertical slice:
   starting an allowlisted provider, viewing output, sending input, and closing sessions.
 - `docs/remote-setup.md`: host bootstrap, Mac setup, SSH rules, and smoke tests.
 
-This is a remote-terminal slice with a session plane: snapshot/replay of buffered output,
-heartbeat detection, and a backend adapter that routes remote bytes into the existing
-terminal channels under logical ids (`remote:<sessionId>`). Remote hive/roster/floor
-reconciliation, reconnect state machine, remote file/git operations, and remote agent
-avatars remain follow-up work.
+This is a remote-terminal slice with a session plane and a file plane: snapshot/replay of
+buffered output, heartbeat detection, byte-bounded replay, a backend adapter that routes
+remote bytes into the existing terminal channels under logical ids (`remote:<sessionId>`),
+and root-confined remote file/git browsing (list, read, `git status`, `git log`).
+Remote hive/roster/floor reconciliation, remote worktrees, remote agent avatars, and
+remote approvals remain follow-up work.
 
 ## Findings
 

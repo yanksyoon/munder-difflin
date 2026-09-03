@@ -1,7 +1,8 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
-import { existsSync, realpathSync } from 'node:fs';
-import { isAbsolute, relative, sep } from 'node:path';
+import { existsSync, realpathSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import {
   FrameDecoder, encodeFrame, PROTOCOL_VERSION, REQUIRED_REMOTE_CAPABILITIES, type RemoteMessage
 } from '../shared/remoteProtocol';
@@ -10,6 +11,7 @@ const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_ARGUMENT_BYTES = 16 * 1024;
 const BLOCKED_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'env', 'busybox', 'xargs', 'find', 'node', 'npm', 'python', 'python3', 'perl', 'ruby', 'ssh', 'sudo', 'curl', 'wget']);
 const MAX_SESSIONS = 16;
+const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_BUFFERED_EVENTS = 2048;
 const MAX_BUFFERED_SESSIONS = 64;
 
@@ -140,6 +142,66 @@ export class RemoteHelper {
       if (typeof arg !== 'string' || Buffer.byteLength(arg) > MAX_ARGUMENT_BYTES) throw new Error('invalid arg');
       return arg;
     });
+  }
+
+  private validateRelativePath(value: unknown): { rel: string; abs: string } {
+    if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('invalid path');
+    const rel = value.startsWith('/') ? value.slice(1) : value;
+    if (!isWithinRemoteRoot(this.root, join(this.root, rel))) throw new Error('path escapes remote root');
+    const abs = join(this.root, rel);
+    if (!existsSync(abs)) throw new Error('path does not exist');
+    return { rel, abs };
+  }
+
+  private fsList(request: RemoteMessage): void {
+    try {
+      const payload = payloadOf(request);
+      const dir = typeof payload.path === 'string' && payload.path ? payload.path : '.';
+      const { abs } = this.validateRelativePath(dir);
+      if (!statSync(abs).isDirectory()) throw new Error('not a directory');
+      const entries = readdirSync(abs, { withFileTypes: true })
+        .map((entry) => ({ name: entry.name, directory: entry.isDirectory() }))
+        .sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
+      this.respond(request, 'fs_list', { path: dir, entries });
+    } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
+  }
+
+  private fsRead(request: RemoteMessage): void {
+    try {
+      const payload = payloadOf(request);
+      const path = payload.path;
+      if (typeof path !== 'string' || !path) { this.send(errorMessage(request, 'invalid path')); return; }
+      const { abs } = this.validateRelativePath(path);
+      const st = statSync(abs);
+      if (!st.isFile()) { this.send(errorMessage(request, 'not a file')); return; }
+      if (st.size > MAX_TEXT_BYTES) { this.send(errorMessage(request, 'file too large')); return; }
+      const content = readFileSync(abs, 'utf8');
+      this.respond(request, 'fs_read', { path, bytes: st.size, content });
+    } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
+  }
+
+  private gitRun(request: RemoteMessage, op: 'git_status' | 'git_log', cwdRel: string, cwdAbs: string): void {
+    try {
+      const args = op === 'git_status' ? ['status', '--short', '--branch'] : ['log', '--oneline', '-n', '20'];
+      execFile('git', args, { cwd: cwdAbs, timeout: 10_000, maxBuffer: MAX_TEXT_BYTES, windowsHide: true },
+        (error, stdout, stderr) => {
+          if (error && error.code !== 1) {
+            this.send(errorMessage(request, `git failed: ${(stderr || error.message).slice(0, 2000)}`));
+            return;
+          }
+          this.respond(request, op, { path: cwdRel, output: (stdout + (error ? '\n' + stderr : '')).slice(0, MAX_TEXT_BYTES) });
+        });
+    } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
+  }
+
+  private git(request: RemoteMessage, op: 'git_status' | 'git_log'): void {
+    try {
+      const payload = payloadOf(request);
+      const dir = typeof payload.path === 'string' && payload.path ? payload.path : '.';
+      const { rel, abs } = this.validateRelativePath(dir);
+      if (!statSync(abs).isDirectory()) { this.send(errorMessage(request, 'not a directory')); return; }
+      this.gitRun(request, op, rel, abs);
+    } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
   }
 
   private start(request: RemoteMessage): void {
@@ -282,6 +344,10 @@ export class RemoteHelper {
           this.respond(request, 'close', {});
           return;
         }
+        case 'fs_list': this.fsList(request); return;
+        case 'fs_read': this.fsRead(request); return;
+        case 'git_status': this.git(request, 'git_status'); return;
+        case 'git_log': this.git(request, 'git_log'); return;
         default: this.send(errorMessage(request, `unsupported operation: ${request.op}`));
       }
     } catch (error) {

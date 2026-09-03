@@ -133,6 +133,22 @@ export class RemoteBackend {
     await this.transport.request('signal', { signal }, sessionId);
   }
 
+  async fsList(path?: string): Promise<RemoteMessage> {
+    return this.transport.request('fs_list', path ? { path } : {});
+  }
+
+  async fsRead(path: string): Promise<RemoteMessage> {
+    return this.transport.request('fs_read', { path });
+  }
+
+  async gitStatus(path?: string): Promise<RemoteMessage> {
+    return this.transport.request('git_status', path ? { path } : {});
+  }
+
+  async gitLog(path?: string): Promise<RemoteMessage> {
+    return this.transport.request('git_log', path ? { path } : {});
+  }
+
   async close(sessionId: string): Promise<void> {
     await this.transport.request('close', {}, sessionId);
     this.sessions.delete(RemoteBackend.logicalId(sessionId));

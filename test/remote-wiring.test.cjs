@@ -11,7 +11,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 test('remote transport is reachable only through explicit main/preload seams', () => {
   const main = read('src/main/index.ts');
   const preload = read('src/preload/index.ts');
-  for (const op of ['connect', 'disconnect', 'list', 'refresh', 'start', 'attach', 'snapshot', 'input', 'resize', 'signal', 'close']) {
+  for (const op of ['connect', 'disconnect', 'list', 'refresh', 'start', 'attach', 'snapshot', 'input', 'resize', 'signal', 'close', 'fsList', 'fsRead', 'gitStatus', 'gitLog']) {
     assert.match(main, new RegExp(`remote:${op}`), `main missing remote:${op}`);
     assert.match(preload, new RegExp(`remote${op[0].toUpperCase()}${op.slice(1)}`), `preload missing remote${op}`);
   }
