@@ -23,7 +23,7 @@ test('SSH transport uses fixed helper argv and correlates framed requests', asyn
   let argv;
   const child = fakeChild((proc, message) => {
     assert.equal(message.op, 'hello');
-    proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, op: 'hello_ack', payload: { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close'] } }));
+    proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, op: 'hello_ack', payload: { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] } }));
   });
   const transport = new SshRemoteTransport({
     host: 'work', helperPath: '/opt/munder-difflin/remote-helper.js',
@@ -35,7 +35,7 @@ test('SSH transport uses fixed helper argv and correlates framed requests', asyn
     args: ['-T', 'work', '--', '/opt/munder-difflin/remote-helper.js', '--stdio'],
     options: { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }
   });
-  assert.deepEqual(hello.payload, { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close'] });
+  assert.deepEqual(hello.payload, { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] });
   transport.close();
 });
 
@@ -61,7 +61,7 @@ test('SSH handshake failure terminates the helper process', async () => {
 
 test('SSH transport rejects a correlated response for the wrong operation', async () => {
   const child = fakeChild((proc, message) => {
-    proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, op: message.op === 'hello' ? 'hello_ack' : 'start', payload: message.op === 'hello' ? { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close'] } : {} }));
+    proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, op: message.op === 'hello' ? 'hello_ack' : 'start', payload: message.op === 'hello' ? { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] } : {} }));
   });
   const transport = new SshRemoteTransport({ host: 'work', helperPath: '/opt/munder/remote-helper.js', spawn: () => child });
   await transport.connect();
@@ -80,7 +80,7 @@ test('SSH transport rejects a helper with an incompatible handshake', async () =
 test('SSH transport rejects a correlated response for the wrong session', async () => {
   const child = fakeChild((proc, message) => {
     const payload = message.op === 'hello'
-      ? { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close'] }
+      ? { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] }
       : {};
     proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, sessionId: message.op === 'hello' ? undefined : 'other', op: message.op === 'hello' ? 'hello_ack' : message.op, payload }));
   });
@@ -88,4 +88,22 @@ test('SSH transport rejects a correlated response for the wrong session', async 
   await transport.connect();
   await assert.rejects(transport.request('input', { data: 'x' }, 's1'), /unexpected remote session/);
   transport.close();
+});
+
+test('SSH transport heartbeat closes a stalled helper', async () => {
+  let closed = false;
+  const responder = fakeChild((proc, message) => {
+    if (message.op === 'hello') {
+      proc.stdout.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'response', requestId: message.requestId, op: 'hello_ack', payload: { protocol: PROTOCOL_VERSION, capabilities: ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] } }));
+    }
+    // ping is deliberately not answered -> request timeout -> transport.close()
+  });
+  const transport = new SshRemoteTransport({
+    host: 'work', helperPath: '/opt/munder/remote-helper.js', requestTimeoutMs: 15, heartbeatMs: 20,
+    spawn: () => responder
+  });
+  transport.onClose(() => { closed = true; });
+  await transport.connect();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(closed, true);
 });

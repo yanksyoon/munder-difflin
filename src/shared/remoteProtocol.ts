@@ -2,7 +2,7 @@
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_FRAME_BYTES = 4 * 1024 * 1024;
-export const REQUIRED_REMOTE_CAPABILITIES = ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close'] as const;
+export const REQUIRED_REMOTE_CAPABILITIES = ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot'] as const;
 
 export type RemoteMessageType = 'request' | 'response' | 'event';
 export type RemoteOperation =
@@ -19,6 +19,10 @@ export interface RemoteMessage {
   seq?: number;
   payload?: unknown;
 }
+
+const SESSION_REQUESTS = new Set<RemoteOperation>(['attach', 'input', 'resize', 'signal', 'close', 'snapshot']);
+const SESSION_RESPONSES = new Set<RemoteOperation>(['start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot', 'error']);
+const EVENT_OPS = new Set<RemoteOperation>(['output', 'exit', 'hook_event']);
 
 const OPERATIONS = new Set<RemoteOperation>([
   'hello', 'hello_ack', 'list', 'start', 'attach', 'input', 'resize',
@@ -45,8 +49,12 @@ export function isRemoteMessage(value: unknown): value is RemoteMessage {
   if (message.seq !== undefined && (!Number.isSafeInteger(message.seq) || message.seq < 0)) return false;
   // Correlation and stream identity are mandatory at the protocol boundary.
   if ((message.type === 'request' || message.type === 'response') && !message.requestId) return false;
-  if (message.type === 'event' && (message.op === 'output' || message.op === 'exit' || message.op === 'hook_event')
-    && (!message.sessionId || message.seq === undefined)) return false;
+  if (message.type === 'request' && message.sessionId !== undefined && !SESSION_REQUESTS.has(message.op as RemoteOperation)) return false;
+  if (message.type === 'response' && message.sessionId !== undefined && !SESSION_RESPONSES.has(message.op as RemoteOperation)) return false;
+  if (message.type === 'event') {
+    if (!EVENT_OPS.has(message.op as RemoteOperation)) return false;
+    if (!message.sessionId || message.seq === undefined) return false;
+  }
   return true;
 }
 

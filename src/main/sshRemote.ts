@@ -21,6 +21,9 @@ export interface SshRemoteOptions {
   host: string;
   helperPath: string;
   requestTimeoutMs?: number;
+  /** Optional heartbeat ping interval. A stalled helper that never answers a
+   *  ping trips the request timeout and closes the transport. 0/undefined disables. */
+  heartbeatMs?: number;
   spawn?: SpawnRemoteProcess;
 }
 
@@ -45,6 +48,7 @@ export class SshRemoteTransport {
   private readonly events = new Set<RemoteEventHandler>();
   private readonly closeEvents = new Set<(error?: Error) => void>();
   private readonly lastEventSeq = new Map<string, number>();
+  private heartbeatTimer: NodeJS.Timeout | null = null;
   private nextRequest = 0;
   private closed = false;
 
@@ -88,11 +92,25 @@ export class SshRemoteTransport {
         || !REQUIRED_REMOTE_CAPABILITIES.every((capability) => capabilities.includes(capability))) {
         throw new Error('remote helper protocol/capability mismatch');
       }
+      this.startHeartbeat();
       return hello;
     }).catch((error) => {
       this.close();
       throw error;
     });
+  }
+
+  private startHeartbeat(): void {
+    const interval = this.options.heartbeatMs;
+    if (!interval || interval <= 0) return;
+    this.heartbeatTimer = setInterval(() => {
+      if (this.closed || !this.child) return;
+      void this.request('ping', {}).catch(() => { /* timeout path closes the transport */ });
+    }, interval);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
   }
 
   request(op: Exclude<RemoteOperation, 'hello_ack' | 'output' | 'exit' | 'hook_event' | 'error'>, payload: unknown, sessionId?: string): Promise<RemoteMessage> {
@@ -135,6 +153,7 @@ export class SshRemoteTransport {
   }
 
   close(): void {
+    this.stopHeartbeat();
     const child = this.child;
     this.closed = true;
     this.child = null;
@@ -171,6 +190,10 @@ export class SshRemoteTransport {
       this.fail(new Error('unexpected remote message direction'));
       return;
     }
+    if (message.op !== 'output' && message.op !== 'exit' && message.op !== 'hook_event') {
+      this.fail(new Error('unexpected remote event operation'));
+      return;
+    }
     if (message.sessionId && message.seq !== undefined) {
       const previous = this.lastEventSeq.get(message.sessionId);
       if (previous !== undefined && message.seq <= previous) return;
@@ -187,6 +210,7 @@ export class SshRemoteTransport {
 
   private fail(error: Error): void {
     if (this.closed) return;
+    this.stopHeartbeat();
     const child = this.child;
     this.closed = true;
     this.child = null;

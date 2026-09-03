@@ -15,6 +15,9 @@ const labelStyle: React.CSSProperties = {
 
 type RemoteSession = { id: string; cwd: string; command: string; pid: number; seq: number };
 
+const REMOTE_ID_PREFIX = 'remote:';
+function logicalId(sessionId: string): string { return `${REMOTE_ID_PREFIX}${sessionId}`; }
+
 function decodeBase64(value: string, decoder: TextDecoder): string {
   const binary = atob(value);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
@@ -39,32 +42,47 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
   const decoders = useRef(new Map<string, TextDecoder>());
 
   const refresh = async (): Promise<void> => {
-    const result = await window.cth.remoteList();
+    const result = await window.cth.remoteRefresh();
     if (!result.ok) { setNote(result.error ?? 'remote list failed'); return; }
-    const listed = (result.response?.payload as { sessions?: RemoteSession[] } | undefined)?.sessions;
-    setSessions(Array.isArray(listed) ? listed : []);
+    setSessions(result.sessions ?? []);
+  };
+
+  /** Replay a session's buffered output so a reconnect never starts blank. */
+  const replay = async (sessionId: string): Promise<void> => {
+    const result = await window.cth.remoteSnapshot(sessionId);
+    if (!result.ok || !result.response) return;
+    const events = (result.response.payload as { events?: RemoteMessage[] } | undefined)?.events ?? [];
+    const id = logicalId(sessionId);
+    for (const event of events) {
+      if (event.op !== 'output') continue;
+      const data = (event.payload as { data?: unknown } | undefined)?.data;
+      if (typeof data !== 'string') continue;
+      try {
+        const decoder = decoders.current.get(id) ?? (() => { const next = new TextDecoder(); decoders.current.set(id, next); return next; })();
+        const text = decodeBase64(data, decoder);
+        setOutput((prev) => ({ ...prev, [id]: ((prev[id] ?? '') + text).slice(-1_000_000) }));
+      } catch { /* malformed event; ignore */ }
+    }
   };
 
   useEffect(() => {
     const offEvent = window.cth.onRemoteEvent((message: RemoteMessage) => {
       if (!message.sessionId) return;
+      const id = logicalId(message.sessionId);
       if (message.op === 'output') {
         const data = (message.payload as { data?: unknown } | undefined)?.data;
         if (typeof data === 'string') {
           try {
-            const decoder = decoders.current.get(message.sessionId!) ?? (() => { const next = new TextDecoder(); decoders.current.set(message.sessionId!, next); return next; })();
+            const decoder = decoders.current.get(id) ?? (() => { const next = new TextDecoder(); decoders.current.set(id, next); return next; })();
             const text = decodeBase64(data, decoder);
-            setOutput((prev) => ({
-              ...prev,
-              [message.sessionId!]: ((prev[message.sessionId!] ?? '') + text).slice(-1_000_000)
-            }));
+            setOutput((prev) => ({ ...prev, [id]: ((prev[id] ?? '') + text).slice(-1_000_000) }));
           } catch { setNote('invalid remote output'); }
         }
       } else if (message.op === 'exit') {
-        const decoder = decoders.current.get(message.sessionId);
+        const decoder = decoders.current.get(id);
         const tail = decoder?.decode() ?? '';
-        if (tail) setOutput((prev) => ({ ...prev, [message.sessionId!]: (prev[message.sessionId!] ?? '') + tail }));
-        decoders.current.delete(message.sessionId);
+        if (tail) setOutput((prev) => ({ ...prev, [id]: (prev[id] ?? '') + tail }));
+        decoders.current.delete(id);
         setSessions((prev) => prev.filter((session) => session.id !== message.sessionId));
       }
     });
@@ -82,8 +100,9 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
     setConnected(true);
     try { await window.cth.updateConfig({ remoteTarget: { host: host.trim(), helperPath: helperPath.trim() } }); }
     catch { /* connection remains usable; persistence can be retried next time */ }
-    setNote('connected');
-    await refresh();
+    setSessions(result.sessions ?? []);
+    for (const session of result.sessions ?? []) { setSelected((prev) => prev ?? session.id); await replay(session.id); }
+    setNote('connected — sessions restored');
   };
 
   const disconnect = async (): Promise<void> => {
@@ -94,22 +113,21 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
   const start = async (): Promise<void> => {
     const result = await window.cth.remoteStart({ cwd: cwd.trim(), command: command.trim() });
     if (!result.ok) { setNote(result.error ?? 'start failed'); return; }
-    const session = (result.response?.payload as { session?: RemoteSession } | undefined)?.session;
-    if (session) { setSessions((prev) => [...prev, session]); setSelected(session.id); }
+    if (result.session) { setSessions((prev) => [...prev, result.session!]); setSelected(result.session!.id); }
     setNote('remote session started');
   };
 
   const sendInput = async (): Promise<void> => {
     if (!selected || !input) return;
-    const result = await window.cth.remoteInput(selected, input + '\r');
+    const result = await window.cth.remoteInput(logicalId(selected), input + '\r');
     if (!result.ok) setNote(result.error ?? 'input failed'); else setInput('');
   };
 
-  const closeSession = async (id: string): Promise<void> => {
-    const result = await window.cth.remoteClose(id);
+  const closeSession = async (sessionId: string): Promise<void> => {
+    const result = await window.cth.remoteClose(logicalId(sessionId));
     if (!result.ok) { setNote(result.error ?? 'close failed'); return; }
-    setSessions((prev) => prev.filter((session) => session.id !== id));
-    if (selected === id) setSelected(null);
+    setSessions((prev) => prev.filter((session) => session.id !== sessionId));
+    if (selected === sessionId) setSelected(null);
   };
 
   return (
@@ -124,7 +142,9 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
       <label style={labelStyle}>Absolute helper path<input value={helperPath} onChange={(e) => setHelperPath(e.target.value)} placeholder="/home/ubuntu/bin/munder-remote" style={inputStyle} /></label>
       <div style={{ display: 'flex', gap: 8 }}>
         <PixelButton variant="primary" size="sm" onClick={() => void connect()} disabled={!host.trim() || !helperPath.trim()}>Connect</PixelButton>
+        <PixelButton variant="secondary" size="sm" onClick={() => void connect()} disabled={!host.trim() || !helperPath.trim()}>Reconnect</PixelButton>
         <PixelButton variant="secondary" size="sm" onClick={() => void disconnect()} disabled={!connected}>Disconnect</PixelButton>
+        <PixelButton variant="ghost" size="sm" onClick={() => void refresh()} disabled={!connected}>Reload sessions</PixelButton>
         <span style={{ fontSize: 12, color: connected ? 'var(--cth-mint)' : 'var(--cth-ink-500)', alignSelf: 'center' }}>{connected ? 'connected' : 'not connected'}</span>
       </div>
       {connected && <>
@@ -139,6 +159,7 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
           <div key={session.id} style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: 8, background: 'var(--cth-paper-100)', boxShadow: 'inset 0 0 0 1px var(--cth-ink-300)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <button type="button" onClick={() => setSelected(session.id)} style={{ flex: 1, textAlign: 'left', border: 0, background: 'transparent', color: 'var(--cth-ink-900)', cursor: 'pointer', fontFamily: 'var(--cth-font-mono)' }}>{session.command} · {session.id.slice(0, 12)}</button>
+              <PixelButton variant="ghost" size="sm" onClick={() => { setSelected(session.id); void replay(session.id); }}>Replay</PixelButton>
               <PixelButton variant="destructive" size="sm" onClick={() => void closeSession(session.id)}>Close</PixelButton>
             </div>
             {selected === session.id && <>

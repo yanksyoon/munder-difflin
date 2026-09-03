@@ -49,7 +49,7 @@ test('remote helper starts an allowlisted command and streams output', async (t)
   child.stdin.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'h1', op: 'hello', payload: {} }));
   const [hello] = await helloWait;
   assert.equal(hello.op, 'hello_ack');
-  assert.deepEqual(hello.payload.capabilities, ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close']);
+  assert.deepEqual(hello.payload.capabilities, ['list', 'start', 'attach', 'input', 'resize', 'signal', 'close', 'snapshot']);
   assert.equal(Object.hasOwn(hello.payload, 'root'), false, 'absolute host paths stay out of handshake');
 
   const sessionWait = waitForMessages(decoder, child, [
@@ -66,6 +66,18 @@ test('remote helper starts an allowlisted command and streams output', async (t)
   assert.equal(started.sessionId, 's1');
   assert.equal(Buffer.from(output.payload.data, 'base64').toString(), 'remote-ok');
   assert.equal(exited.payload.exitCode, 0);
+
+  const snapshotWait = waitForMessages(decoder, child, [(m) => m.requestId === 'snap1']);
+  child.stdin.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'snap1', op: 'snapshot', sessionId: 's1', payload: { sinceSeq: 0 } }));
+  const [snapshot] = await snapshotWait;
+  assert.equal(snapshot.op, 'snapshot');
+  assert.equal(snapshot.sessionId, 's1');
+  const events = snapshot.payload.events;
+  assert.ok(Array.isArray(events), 'snapshot must replay buffered events');
+  assert.equal(events[0].op, 'output');
+  assert.equal(Buffer.from(events[0].payload.data, 'base64').toString(), 'remote-ok');
+  assert.equal(events[events.length - 1].op, 'exit');
+  assert.equal(snapshot.payload.session, null);
 });
 
 test('remote helper refuses shell interpreters even if configured', () => {

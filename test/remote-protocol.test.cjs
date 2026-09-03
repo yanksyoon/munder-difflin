@@ -30,3 +30,11 @@ test('remote protocol rejects malformed, unknown, and oversized frames', () => {
   assert.equal(isRemoteMessage({ protocol: 999, type: 'event', op: 'output' }), false);
   assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'event', op: 'run-shell' }), false);
 });
+test('remote protocol restricts event ops and session scoping', () => {
+  assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'event', sessionId: 's1', seq: 0, op: 'output' }), true);
+  assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'event', sessionId: 's1', seq: 0, op: 'list' }), false);
+  assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'response', requestId: 'r1', op: 'hello_ack', sessionId: 's1' }), false);
+  assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'r1', op: 'hello', sessionId: 's1' }), false);
+  assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'r1', op: 'snapshot', sessionId: 's1' }), true);
+  assert.equal(isRemoteMessage({ protocol: PROTOCOL_VERSION, type: 'response', requestId: 'r1', op: 'snapshot', sessionId: 's1' }), true);
+});

@@ -10,6 +10,8 @@ const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_ARGUMENT_BYTES = 16 * 1024;
 const BLOCKED_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'env', 'busybox', 'xargs', 'find', 'node', 'npm', 'python', 'python3', 'perl', 'ruby', 'ssh', 'sudo', 'curl', 'wget']);
 const MAX_SESSIONS = 16;
+const MAX_BUFFERED_EVENTS = 2048;
+const MAX_BUFFERED_SESSIONS = 64;
 
 export interface RemoteHelperOptions {
   root?: string;
@@ -23,6 +25,11 @@ interface Session {
   command: string;
   proc: pty.IPty;
   seq: number;
+}
+
+interface EventBuffer {
+  startSeq: number;
+  events: RemoteMessage[];
 }
 
 function payloadOf(message: RemoteMessage): Record<string, unknown> {
@@ -58,6 +65,7 @@ export class RemoteHelper {
   private readonly commands: readonly string[];
   private readonly output: NodeJS.WritableStream;
   private readonly sessions = new Map<string, Session>();
+  private readonly buffers = new Map<string, EventBuffer>();
 
   constructor(options: RemoteHelperOptions = {}) {
     const root = options.root ?? process.env.MUNDER_REMOTE_ROOT;
@@ -84,6 +92,23 @@ export class RemoteHelper {
 
   private sessionInfo(session: Session): Record<string, unknown> {
     return { id: session.id, cwd: session.cwd, command: session.command, pid: session.proc.pid, seq: session.seq };
+  }
+
+  private recordEvent(sessionId: string, event: RemoteMessage): void {
+    let buffer = this.buffers.get(sessionId);
+    if (!buffer) {
+      buffer = { startSeq: event.seq ?? 0, events: [] };
+      this.buffers.set(sessionId, buffer);
+    }
+    buffer.events.push(event);
+    if (buffer.events.length > MAX_BUFFERED_EVENTS) {
+      buffer.events.shift();
+      buffer.startSeq = buffer.events[0]?.seq ?? buffer.startSeq;
+    }
+    if (this.buffers.size > MAX_BUFFERED_SESSIONS) {
+      const oldest = this.buffers.keys().next().value;
+      if (oldest !== undefined) this.buffers.delete(oldest);
+    }
   }
 
   private validateCwd(value: unknown): string {
@@ -132,7 +157,9 @@ export class RemoteHelper {
           // Keep each encoded frame bounded even when a PTY implementation emits a large chunk.
           for (let offset = 0; offset < data.length; offset += 512 * 1024) {
             const chunk = data.slice(offset, offset + 512 * 1024);
-            this.send({ protocol: PROTOCOL_VERSION, type: 'event', sessionId: id, seq: session.seq++, op: 'output', payload: { data: Buffer.from(chunk).toString('base64') } });
+            const event: RemoteMessage = { protocol: PROTOCOL_VERSION, type: 'event', sessionId: id, seq: session.seq++, op: 'output', payload: { data: Buffer.from(chunk).toString('base64') } };
+            this.recordEvent(id, event);
+            this.send(event);
           }
         } catch (error) {
           this.stop();
@@ -144,7 +171,9 @@ export class RemoteHelper {
       proc.onExit(({ exitCode, signal }) => {
         if (this.sessions.get(id) !== session) return;
         this.sessions.delete(id);
-        this.send({ protocol: PROTOCOL_VERSION, type: 'event', sessionId: id, seq: session.seq++, op: 'exit', payload: { exitCode, signal } });
+        const event: RemoteMessage = { protocol: PROTOCOL_VERSION, type: 'event', sessionId: id, seq: session.seq++, op: 'exit', payload: { exitCode, signal } };
+        this.recordEvent(id, event);
+        this.send(event);
       });
       this.send({ protocol: PROTOCOL_VERSION, type: 'response', requestId: request.requestId, sessionId: id, op: 'start', payload: { session: this.sessionInfo(session) } });
     } catch (error) {
@@ -157,6 +186,7 @@ export class RemoteHelper {
       try { session.proc.kill(); } catch { /* already exited */ }
     }
     this.sessions.clear();
+    this.buffers.clear();
   }
 
   handle(request: RemoteMessage): void {
@@ -179,6 +209,16 @@ export class RemoteHelper {
           const session = id ? this.sessions.get(id) : undefined;
           if (!session) { this.send(errorMessage(request, 'session not found')); return; }
           this.respond(request, 'attach', { session: this.sessionInfo(session) });
+          return;
+        }
+        case 'snapshot': {
+          const id = typeof payload.sessionId === 'string' ? payload.sessionId : request.sessionId;
+          const session = id ? this.sessions.get(id) : undefined;
+          const buffer = id ? this.buffers.get(id) : undefined;
+          const sinceSeq = typeof payload.sinceSeq === 'number' && Number.isSafeInteger(payload.sinceSeq) && payload.sinceSeq >= 0
+            ? payload.sinceSeq : 0;
+          const events = buffer ? buffer.events.filter((event) => (event.seq ?? 0) >= sinceSeq) : [];
+          this.respond(request, 'snapshot', { session: session ? this.sessionInfo(session) : null, events });
           return;
         }
         case 'input': {
@@ -227,7 +267,13 @@ export function runRemoteHelper(): void {
   const decoder = new FrameDecoder();
   process.stdin.on('data', (chunk: Buffer) => {
     try {
-      for (const message of decoder.push(chunk)) helper.handle(message);
+      for (const message of decoder.push(chunk)) {
+        if (message.type !== 'request') {
+          process.stderr.write('[remote-helper] dropped non-request message\n');
+          continue;
+        }
+        helper.handle(message);
+      }
     } catch (error) {
       helper.stop();
       process.stderr.write(`[remote-helper] ${error instanceof Error ? error.message : String(error)}\n`);

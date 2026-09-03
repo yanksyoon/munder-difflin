@@ -13,6 +13,14 @@ export type { HeroPayload } from '../shared/heroPayload';
 import type { HookEvent } from '../shared/hookEvents';
 import type { RemoteMessage } from '../shared/remoteProtocol';
 export type { RemoteMessage } from '../shared/remoteProtocol';
+/** Remote helper session as surfaced to the renderer (id = raw helper session id). */
+export interface RemoteSessionInfo {
+  id: string;
+  cwd: string;
+  command: string;
+  pid: number;
+  seq: number;
+}
 export type { HookEvent } from '../shared/hookEvents';
 import type { LocalSkill, CatalogSkill } from '../main/skills';
 export type { LocalSkill, CatalogSkill } from '../main/skills';
@@ -579,16 +587,18 @@ const api = {
     ipcRenderer.invoke('analytics:messageSent', surface).then(() => undefined, () => undefined),
 
   // ─── SSH remote transport (separate from local PTY) ───────────────────────
-  remoteConnect: (options: { host: string; helperPath: string }): Promise<{ ok: boolean; hello?: unknown; error?: string }> =>
+  remoteConnect: (options: { host: string; helperPath: string }): Promise<{ ok: boolean; hello?: unknown; sessions?: RemoteSessionInfo[]; error?: string }> =>
     ipcRenderer.invoke('remote:connect', options),
   remoteDisconnect: (): Promise<{ ok: boolean }> => ipcRenderer.invoke('remote:disconnect'),
-  remoteList: (): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:list'),
-  remoteStart: (payload: unknown): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:start', payload),
-  remoteAttach: (sessionId: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:attach', sessionId),
-  remoteInput: (sessionId: string, data: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:input', sessionId, data),
-  remoteResize: (sessionId: string, cols: number, rows: number): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:resize', sessionId, cols, rows),
-  remoteSignal: (sessionId: string, signal: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:signal', sessionId, signal),
-  remoteClose: (sessionId: string): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:close', sessionId),
+  remoteList: (): Promise<{ ok: boolean; sessions?: RemoteSessionInfo[]; error?: string }> => ipcRenderer.invoke('remote:list'),
+  remoteRefresh: (): Promise<{ ok: boolean; sessions?: RemoteSessionInfo[]; error?: string }> => ipcRenderer.invoke('remote:refresh'),
+  remoteStart: (payload: unknown): Promise<{ ok: boolean; logicalId?: string; session?: RemoteSessionInfo; error?: string }> => ipcRenderer.invoke('remote:start', payload),
+  remoteAttach: (sessionId: string): Promise<{ ok: boolean; sessions?: RemoteSessionInfo[]; error?: string }> => ipcRenderer.invoke('remote:attach', sessionId),
+  remoteSnapshot: (sessionId: string, sinceSeq?: number): Promise<{ ok: boolean; response?: RemoteMessage; error?: string }> => ipcRenderer.invoke('remote:snapshot', sessionId, sinceSeq),
+  remoteInput: (sessionId: string, data: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('remote:input', sessionId, data),
+  remoteResize: (sessionId: string, cols: number, rows: number): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('remote:resize', sessionId, cols, rows),
+  remoteSignal: (sessionId: string, signal: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('remote:signal', sessionId, signal),
+  remoteClose: (sessionId: string): Promise<{ ok: boolean; sessions?: RemoteSessionInfo[]; error?: string }> => ipcRenderer.invoke('remote:close', sessionId),
   onRemoteEvent: (cb: (message: RemoteMessage) => void): (() => void) => {
     const listener = (_e: IpcRendererEvent, message: RemoteMessage) => cb(message);
     ipcRenderer.on('remote:event', listener);

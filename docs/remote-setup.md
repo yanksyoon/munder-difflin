@@ -2,18 +2,26 @@
 
 ## Current scope
 
-This fork adds the first remote transport slice:
+This fork adds the SSH remote agent transport plus the Phase 3 session plane:
 
 - `src/shared/remoteProtocol.ts` defines a versioned, length-prefixed protocol.
-- `src/remote/remoteHelper.ts` runs allowlisted remote PTYs over stdin/stdout.
-- `src/main/sshRemote.ts` starts the helper through OpenSSH and correlates requests.
-- `remote:*` Electron IPC methods expose connect, list, start, attach, input, resize,
-  signal, close, and event/status delivery without changing local `pty:*` behavior.
+- `src/remote/remoteHelper.ts` runs allowlisted remote PTYs over stdin/stdout and keeps a
+  bounded per-session event buffer for replay.
+- `src/main/sshRemote.ts` starts the helper through OpenSSH, correlates requests, validates
+  responses/events, and pings a heartbeat so a stalled helper is detected.
+- `src/main/remoteBackend.ts` is the session registry + terminal adapter: it maps helper
+  sessions to logical ids (`remote:<sessionId>`) and forwards output/exit into the existing
+  terminal channels so the renderer can consume remote streams without touching local
+  `pty:*`/restore state.
+- `remote:*` Electron IPC methods expose connect, disconnect, list, refresh, start, attach,
+  snapshot (replay), input, resize, signal, close, and event/status delivery without
+  changing local `pty:*` behavior.
+- The Settings → Connections panel adds Reconnect, Reload sessions, and Replay; after a
+  reconnect it restores the helper's live sessions and replays their buffered output.
 
-This slice is intentionally not a public web dashboard. It does not expose a TCP port,
-move secrets to the Mac, or merge remote sessions into the existing local floor/hive
-reconciliation yet. The next integration step is to make the renderer's terminal/floor
-consume the remote backend without treating remote paths as local paths.
+This slice is intentionally not a public web dashboard. It does not expose a TCP port or
+move secrets to the Mac. Remote agents are not yet merged into the local floor/hive
+roster reconciliation; that remains the next phase.
 
 ## Architecture
 

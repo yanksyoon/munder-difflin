@@ -10,7 +10,7 @@ import { join, resolve, sep, basename, dirname, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { request as httpsRequest } from 'node:https';
 import { PtyManager, type SpawnOptions } from './pty';
-import { SshRemoteTransport } from './sshRemote';
+import { RemoteBackend } from './remoteBackend';
 import { resolveCommand as resolveCliCommand, isSafeCommandName } from './shellEnv';
 import { initAutoUpdater, abortPendingRestart } from './updater';
 import { RealtimeFloorWatcher } from './realtimeFloorWatcher';
@@ -110,7 +110,7 @@ process.on('unhandledRejection', (reason) => {
 const ptyManager = new PtyManager();
 /** Explicit remote transport. It is deliberately separate from ptyManager: remote
  * sessions do not own local paths, local hive records, or local teardown hooks. */
-let remoteTransport: SshRemoteTransport | null = null;
+let remoteBackend: RemoteBackend | null = null;
 let remoteOwner: Electron.WebContents | null = null;
 let remoteGeneration = 0;
 
@@ -2455,21 +2455,32 @@ function installAppMenu(): void {
 
 
 // ─── IPC: SSH remote transport (explicitly separate from local pty:* IPC) ────
+/** Logical remote id prefix; output/exit are forwarded to existing terminal
+ *  channels under this id so the renderer can consume remote streams without
+ *  local `pty:*`/restore ever seeing them. */
+const REMOTE_ID_PREFIX = 'remote:';
+function remoteLogicalId(sessionId: string): string {
+  return `${REMOTE_ID_PREFIX}${sessionId}`;
+}
+function remoteRawSessionId(id: string): string {
+  return id.startsWith(REMOTE_ID_PREFIX) ? id.slice(REMOTE_ID_PREFIX.length) : id;
+}
+
 function remoteSenderSend(sender: Electron.WebContents, channel: string, payload: unknown): void {
   if (sender.isDestroyed()) return;
   try { sender.send(channel, payload); } catch { /* window closed during disconnect */ }
 }
 
 function closeRemoteTransport(): void {
-  const active = remoteTransport;
-  remoteTransport = null;
+  const active = remoteBackend;
+  remoteBackend = null;
   remoteOwner = null;
-  active?.close();
+  active?.disconnect();
 }
 
-function remoteFor(sender: Electron.WebContents): SshRemoteTransport | null {
-  if (!remoteTransport || remoteOwner !== sender) return null;
-  return remoteTransport;
+function remoteFor(sender: Electron.WebContents): RemoteBackend | null {
+  if (!remoteBackend || remoteOwner !== sender) return null;
+  return remoteBackend;
 }
 
 ipcMain.handle('remote:connect', async (evt, options: unknown) => {
@@ -2481,24 +2492,31 @@ ipcMain.handle('remote:connect', async (evt, options: unknown) => {
   const generation = ++remoteGeneration;
   closeRemoteTransport();
   try {
-    const transport = new SshRemoteTransport({ host: candidate.host, helperPath: candidate.helperPath });
-    transport.onEvent((message) => remoteSenderSend(evt.sender, 'remote:event', message));
-    transport.onClose((error) => {
-      if (remoteTransport === transport) {
-        remoteTransport = null;
-        remoteOwner = null;
-        remoteSenderSend(evt.sender, 'remote:status', { connected: false, error: error?.message });
+    const backend = new RemoteBackend({
+      host: candidate.host,
+      helperPath: candidate.helperPath,
+      handlers: {
+        onOutput: (logicalId, text) => remoteSenderSend(evt.sender, `pty:data:${logicalId}`, text),
+        onExit: (logicalId, exitCode, signal) => remoteSenderSend(evt.sender, `pty:exit:${logicalId}`, { exitCode, signal }),
+        onHookEvent: (message) => remoteSenderSend(evt.sender, 'remote:event', message),
+        onStatus: (connected, error) => {
+          if (remoteBackend === backend && !connected) {
+            remoteBackend = null;
+            remoteOwner = null;
+          }
+          remoteSenderSend(evt.sender, 'remote:status', { connected, error });
+        }
       }
     });
-    const hello = await transport.connect();
+    const hello = await backend.connect();
     if (generation !== remoteGeneration || evt.sender.isDestroyed()) {
-      transport.close();
+      backend.disconnect();
       return { ok: false, error: 'remote connection was superseded' };
     }
-    remoteTransport = transport;
+    remoteBackend = backend;
     remoteOwner = evt.sender;
     remoteSenderSend(evt.sender, 'remote:status', { connected: true });
-    return { ok: true, hello: hello.payload };
+    return { ok: true, hello, sessions: backend.sessionsList() };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -2511,45 +2529,60 @@ ipcMain.handle('remote:disconnect', (evt) => {
   return { ok: true };
 });
 ipcMain.handle('remote:list', async (evt) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport) return { ok: false, error: 'remote transport is not connected' };
-  try { return { ok: true, response: await transport.request('list', {}) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend) return { ok: false, error: 'remote transport is not connected' };
+  try { return { ok: true, sessions: backend.sessionsList() }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:refresh', async (evt) => {
+  const backend = remoteFor(evt.sender);
+  if (!backend) return { ok: false, error: 'remote transport is not connected' };
+  try { await backend.refresh(); return { ok: true, sessions: backend.sessionsList() }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 ipcMain.handle('remote:start', async (evt, payload: unknown) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport) return { ok: false, error: 'remote transport is not connected' };
-  try { return { ok: true, response: await transport.request('start', payload) }; }
-  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend) return { ok: false, error: 'remote transport is not connected' };
+  try {
+    const started = await backend.startSession((payload ?? {}) as { cwd: string; command: string });
+    return { ok: true, logicalId: started.logicalId, session: started.session };
+  } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 ipcMain.handle('remote:attach', async (evt, sessionId: unknown) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
-  try { return { ok: true, response: await transport.request('attach', { sessionId }, sessionId) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
+  try { await backend.attach(remoteRawSessionId(sessionId)); return { ok: true, sessions: backend.sessionsList() }; }
+  catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+});
+ipcMain.handle('remote:snapshot', async (evt, sessionId: unknown, sinceSeq: unknown) => {
+  const backend = remoteFor(evt.sender);
+  const seq = typeof sinceSeq === 'number' && Number.isSafeInteger(sinceSeq) && sinceSeq >= 0 ? sinceSeq : undefined;
+  if (!backend || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
+  try { return { ok: true, response: await backend.snapshot(remoteRawSessionId(sessionId), seq) }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 ipcMain.handle('remote:input', async (evt, sessionId: unknown, data: unknown) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport || typeof sessionId !== 'string' || !sessionId || typeof data !== 'string') return { ok: false, error: 'invalid remote input' };
-  try { return { ok: true, response: await transport.request('input', { data }, sessionId) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend || typeof sessionId !== 'string' || !sessionId || typeof data !== 'string') return { ok: false, error: 'invalid remote input' };
+  try { await backend.write(remoteRawSessionId(sessionId), data); return { ok: true }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 ipcMain.handle('remote:resize', async (evt, sessionId: unknown, cols: unknown, rows: unknown) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport || typeof sessionId !== 'string' || !sessionId || typeof cols !== 'number' || typeof rows !== 'number') return { ok: false, error: 'invalid remote resize' };
-  try { return { ok: true, response: await transport.request('resize', { cols, rows }, sessionId) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend || typeof sessionId !== 'string' || !sessionId || typeof cols !== 'number' || typeof rows !== 'number') return { ok: false, error: 'invalid remote resize' };
+  try { await backend.resize(remoteRawSessionId(sessionId), cols, rows); return { ok: true }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 ipcMain.handle('remote:signal', async (evt, sessionId: unknown, signal: unknown) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport || typeof sessionId !== 'string' || !sessionId || typeof signal !== 'string') return { ok: false, error: 'invalid remote signal' };
-  try { return { ok: true, response: await transport.request('signal', { signal }, sessionId) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend || typeof sessionId !== 'string' || !sessionId || typeof signal !== 'string') return { ok: false, error: 'invalid remote signal' };
+  try { await backend.signal(remoteRawSessionId(sessionId), signal); return { ok: true }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 ipcMain.handle('remote:close', async (evt, sessionId: unknown) => {
-  const transport = remoteFor(evt.sender);
-  if (!transport || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
-  try { return { ok: true, response: await transport.request('close', {}, sessionId) }; }
+  const backend = remoteFor(evt.sender);
+  if (!backend || typeof sessionId !== 'string' || !sessionId) return { ok: false, error: 'invalid remote session' };
+  try { await backend.close(remoteRawSessionId(sessionId)); return { ok: true, sessions: backend.sessionsList() }; }
   catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
 });
 
