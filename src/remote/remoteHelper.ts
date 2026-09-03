@@ -199,8 +199,28 @@ export class RemoteHelper {
 
   private gitRun(request: RemoteMessage, op: 'git_status' | 'git_log', cwdRel: string, cwdAbs: string): void {
     try {
-      const args = op === 'git_status' ? ['status', '--short', '--branch'] : ['log', '--oneline', '-n', '20'];
-      execFile('git', args, { cwd: cwdAbs, timeout: 10_000, maxBuffer: MAX_TEXT_BYTES, windowsHide: true },
+      // Read-only, hook-free git: a repository under the root must never be able to
+      // execute configured hooks (core.fsmonitor, filters, …) when the user merely
+      // browses it. `-c core.fsmonitor=false` disables the fsmonitor hook; the
+      // `-c …` pairs below are inert for our fixed subcommands (status/log) but
+      // serve as a safety net for any config-extension surface; `--no-optional-locks`
+      // stops Git taking advisory locks. Environment is sanitized (no unsafe GIT_*).
+      const args = [
+        '-c', 'core.fsmonitor=false',
+        '-c', 'core.hooksPath=/dev/null',
+        '-c', 'filter.lfs.smudge=cat',
+        '-c', 'filter.lfs.clean=cat',
+        '--no-optional-locks',
+        ...(op === 'git_status' ? ['status', '--short', '--branch'] : ['log', '--oneline', '-n', '20'])
+      ];
+      const gitEnv = { ...process.env };
+      delete gitEnv.GIT_DIR;
+      delete gitEnv.GIT_WORK_TREE;
+      delete gitEnv.GIT_INDEX_FILE;
+      delete gitEnv.GIT_EXTERNAL_DIFF;
+      delete gitEnv.GIT_OBJECT_DIRECTORY;
+      delete gitEnv.GIT_ALTERNATE_OBJECT_DIRECTORIES;
+      execFile('git', args, { cwd: cwdAbs, env: gitEnv, timeout: 10_000, maxBuffer: MAX_TEXT_BYTES, windowsHide: true },
         (error, stdout, stderr) => {
           if (this.stopped) return;
           try {

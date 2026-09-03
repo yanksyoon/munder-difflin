@@ -241,3 +241,45 @@ test('remote fs and git ops reject symlink escapes outside the root', async (t) 
   const git = await capture('g');
   assert.equal(git.op, 'error');
 });
+
+test('git browsing does not execute repository-configured hooks', async (t) => {
+  const { RemoteHelper } = loadTs('src/remote/remoteHelper.ts');
+  const { FrameDecoder } = loadTs('src/shared/remoteProtocol.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-remote-hook-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const marker = path.join(root, 'hooked');
+  const { execFileSync } = require('node:child_process');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'T'], { cwd: root });
+  fs.writeFileSync(path.join(root, 'repo.txt'), 'x', 'utf8');
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-qm', 'init'], { cwd: root });
+  // Configure the malicious fsmonitor ONLY after commit: the test setup's own
+  // `git commit`/`status` would otherwise run the hook before the helper does.
+  const hook = path.join(root, 'evil-fsmonitor.sh');
+  fs.writeFileSync(hook, `#!/bin/sh\nprintf x > "${marker}"\n`, 'utf8');
+  fs.chmodSync(hook, 0o755);
+  execFileSync('git', ['config', 'core.fsmonitor', hook], { cwd: root });
+
+  const frames = [];
+  const output = new (require('node:stream').PassThrough)();
+  output._write = function (chunk, _enc, cb) { this.emit('frame', chunk); cb(); };
+  output.on('frame', (chunk) => frames.push(chunk));
+  const helper = new RemoteHelper({ root, commands: ['printf'], output });
+  const dec = new FrameDecoder();
+  const capture = (requestId) => new Promise((resolve) => {
+    const timer = setInterval(() => {
+      for (const frame of frames) {
+        for (const message of dec.push(frame)) {
+          if (message.requestId === requestId) { clearInterval(timer); resolve(message); return; }
+        }
+      }
+    }, 10);
+  });
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'g', op: 'git_status', payload: {} });
+  const git = await capture('g');
+  assert.equal(git.op, 'git_status');
+  // The malicious fsmonitor hook must NOT have run.
+  assert.equal(fs.existsSync(marker), false, 'git browsing must not execute repo hooks');
+});
