@@ -23,9 +23,8 @@ export interface RemoteBackendHandlers {
   /** Decoded PTY output for a logical session id (`remote:<sessionId>`). */
   onOutput?: (logicalId: string, text: string) => void;
   onExit?: (logicalId: string, exitCode: number, signal?: number) => void;
-  /** Every raw helper event (output, exit, hook_event) before per-kind routing. */
+  /** Every raw helper event (output, exit, hook_event) for renderer delivery. */
   onRawEvent?: (message: RemoteMessage) => void;
-  onHookEvent?: (message: RemoteMessage) => void;
   onStatus?: (connected: boolean, error?: string) => void;
 }
 
@@ -156,8 +155,6 @@ export class RemoteBackend {
       this.sessions.delete(logicalId);
       this.handlers.onExit?.(logicalId, typeof payload?.exitCode === 'number' ? payload.exitCode : 0,
         typeof payload?.signal === 'number' ? payload.signal : undefined);
-      return;
     }
-    this.handlers.onHookEvent?.(message);
   }
 }

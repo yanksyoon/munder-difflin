@@ -48,6 +48,7 @@ function errorMessage(request: RemoteMessage, message: string): RemoteMessage {
     protocol: PROTOCOL_VERSION,
     type: 'response',
     requestId: request.requestId,
+    sessionId: request.sessionId,
     op: 'error',
     payload: { code: 'invalid_request', message }
   };
@@ -233,7 +234,7 @@ export class RemoteHelper {
           const selected = buffer ? buffer.events.filter((event) => (event.seq ?? 0) >= sinceSeq) : [];
           const events: RemoteMessage[] = [];
           let bytes = 0;
-          let truncated = false;
+          let truncated = !!(buffer && buffer.startSeq > sinceSeq);
           for (const event of selected) {
             const eventBytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
             if (bytes + eventBytes > this.maxSnapshotBytes && events.length > 0) { truncated = true; break; }

@@ -2500,7 +2500,6 @@ ipcMain.handle('remote:connect', async (evt, options: unknown) => {
         onRawEvent: (message) => remoteSenderSend(evt.sender, 'remote:event', message),
         onOutput: (logicalId, text) => remoteSenderSend(evt.sender, `pty:data:${logicalId}`, text),
         onExit: (logicalId, exitCode, signal) => remoteSenderSend(evt.sender, `pty:exit:${logicalId}`, { exitCode, signal }),
-        onHookEvent: (message) => remoteSenderSend(evt.sender, 'remote:event', message),
         onStatus: (connected, error) => {
           if (remoteBackend === backend && !connected) {
             remoteBackend = null;

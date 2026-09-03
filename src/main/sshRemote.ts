@@ -103,9 +103,11 @@ export class SshRemoteTransport {
   private startHeartbeat(): void {
     const interval = this.options.heartbeatMs;
     if (!interval || interval <= 0) return;
+    let inFlight = false;
     this.heartbeatTimer = setInterval(() => {
-      if (this.closed || !this.child) return;
-      void this.request('ping', {}).catch(() => { /* timeout path closes the transport */ });
+      if (this.closed || !this.child || inFlight) return;
+      inFlight = true;
+      void this.request('ping', {}).catch(() => { /* timeout path closes the transport */ }).finally(() => { inFlight = false; });
     }, interval);
   }
 

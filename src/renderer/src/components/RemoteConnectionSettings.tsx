@@ -66,6 +66,12 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
     if (!result.ok || !result.response) return;
     const payload = result.response.payload as { events?: RemoteMessage[]; startSeq?: number; truncated?: boolean } | undefined;
     const id = logicalId(sessionId);
+    // Seed the dedupe watermark with the buffer's first retained seq so live
+    // bytes received before replay are never appended twice.
+    if (typeof payload?.startSeq === 'number') {
+      const current = lastSeq.current.get(id) ?? -1;
+      lastSeq.current.set(id, Math.max(current, payload.startSeq - 1));
+    }
     for (const event of payload?.events ?? []) {
       if (event.op !== 'output') continue;
       const data = (event.payload as { data?: unknown } | undefined)?.data;

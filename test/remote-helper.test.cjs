@@ -109,6 +109,12 @@ test('remote helper refuses commands and directories outside policy', async (t) 
   const [badCwd] = await badCwdWait;
   assert.equal(badCwd.type, 'response');
   assert.equal(badCwd.op, 'error');
+
+  const sessionErrorWait = waitForMessages(decoder, child, [(m) => m.requestId === 'missing-input']);
+  child.stdin.write(encodeFrame({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'missing-input', op: 'input', sessionId: 'nope', payload: { data: 'x' } }));
+  const [sessionError] = await sessionErrorWait;
+  assert.equal(sessionError.op, 'error');
+  assert.equal(sessionError.sessionId, 'nope', 'session errors must carry the session id');
 });
 
 test('snapshot replay is byte-bounded, never exceeds the frame, and reports eviction gaps', async (t) => {
@@ -145,4 +151,5 @@ test('snapshot replay is byte-bounded, never exceeds the frame, and reports evic
   assert.ok(Buffer.byteLength(JSON.stringify(snapshot), 'utf8') < MAX_FRAME_BYTES, 'snapshot must never exceed the frame cap');
   assert.doesNotThrow(() => encodeFrame(snapshot), 'snapshot must encode without frame-too-large');
   assert.ok(payload.startSeq > 0, `evicted history must surface a startSeq gap, got ${payload.startSeq}`);
+  assert.equal(payload.truncated, true, 'evicted history must be flagged truncated');
 });
