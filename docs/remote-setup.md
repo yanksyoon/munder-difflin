@@ -193,6 +193,9 @@ bash tools/mac-remote-setup.sh <your-ssh-alias>
 # or: npm run remote:setup
 ```
 
+The script transports the committed remote installer `tools/remote-helper-install.sh` over SSH,
+so it keeps working on macOS (bash 3.2) and Linux (dash/bash login shells).
+
 Environment overrides are documented in the script header (`MD_ALIAS`, `MD_APP_DIR`,
 `MD_REMOTE_DIR`, `MD_REMOTE_ROOT`, `MD_ALLOW_COMMANDS`, `MD_BUILD_MAC`,
 `MD_SKIP_REMOTE`). The default provider allowlist now includes `prime-agent`.

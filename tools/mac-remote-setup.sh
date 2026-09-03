@@ -36,6 +36,9 @@ ALLOW="${MD_ALLOW_COMMANDS:-claude,codex,agy,gemini,qwen,opencode,crush,pi,prime
 
 say() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+# Directory of this script, resolved to an absolute path (works when invoked as
+# `bash tools/mac-remote-setup.sh` from anywhere).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Strict alias: OpenSSH Host aliases are letters/digits plus . _ : @ -. A leading
 # dash would be parsed as an option (e.g. -oProxyCommand=...) — reject it.
@@ -115,47 +118,15 @@ PAYLOAD_SRC
   # The remote login shell (often /bin/sh/dash) only parses this one line — no
   # Bash %q/$'…' syntax — and `bash` is always present as an executable upstream.
   # The script payload itself is single-line base64 (safe alphabet).
-  REMOTE_SCRIPT="$(cat <<'REMOTE_SCRIPT'
-set -euo pipefail
-# Decode the base64 script stream from stdin (see caller for the transport).
-# Values are carried inside the script as KEY=VALUE assignments, validated below.
-REMOTE_DIR=__REMOTE_DIR__
-REMOTE_ROOT=__REMOTE_ROOT__
-ALLOW=__ALLOW__
-FORK_URL=__FORK_URL__
-BRANCH=__BRANCH__
-[ -n "$REMOTE_DIR" ] && [ -n "$REMOTE_ROOT" ] && [ -n "$ALLOW" ] || { echo "missing remote payload" >&2; exit 2; }
-case "$REMOTE_DIR" in *[!A-Za-z0-9_./~-]*) echo "unsafe REMOTE_DIR" >&2; exit 2;; esac
-case "$REMOTE_ROOT" in *[!A-Za-z0-9_./~-]*) echo "unsafe REMOTE_ROOT" >&2; exit 2;; esac
-if [ ! -d "$REMOTE_DIR/.git" ]; then
-  git clone "$FORK_URL" "$REMOTE_DIR"
-fi
-cd "$REMOTE_DIR"
-git fetch --force origin "$BRANCH" >/dev/null
-git checkout -B "$BRANCH" "origin/$BRANCH" >/dev/null
-remote_node="$(command -v node || true)"
-[ -n "$remote_node" ] || { echo "remote node not found" >&2; exit 2; }
-echo "  remote node: $remote_node"
-if [ ! -d node_modules ] || ! npm ls --depth=0 >/dev/null 2>&1; then
-  npm ci --ignore-scripts
-fi
-npm rebuild node-pty >/dev/null 2>&1 || echo "  warning: npm rebuild node-pty failed (check g++/make/python3)" >&2
-npm run build:remote >/dev/null
-BIN_DIR="$HOME/bin"
-mkdir -p "$BIN_DIR"
-# Render the wrapper with printf %q: decoded values, shell-quoted, never literal.
-{
-  printf '#!/bin/sh\nset -eu\n'
-  printf 'export MUNDER_REMOTE_ROOT=%q\n' "$REMOTE_ROOT"
-  printf 'export MUNDER_REMOTE_ALLOW_COMMANDS=%q\n' "$ALLOW"
-  printf 'exec %q %q\n' "$remote_node" "$REMOTE_DIR/tools/remote-helper-launcher.cjs"
-} > "$BIN_DIR/munder-remote"
-chmod 700 "$BIN_DIR/munder-remote"
-echo "  helper wrapper: $BIN_DIR/munder-remote"
-REMOTE_SCRIPT
-)"
-  # Substitute the payload values (all validated: alias/APP_DIR/paths/allowlist)
-  # into the script, then base64 the whole thing.
+    # Encode the committed remote installer (tools/remote-helper-install.sh) as
+  # base64 and run it through a FIXED, POSIX-safe remote command:
+  #   printf '%s' '<b64>' | base64 -d | bash
+  # The remote login shell (e.g. /bin/sh/dash) only parses that one pipe, never
+  # Bash %q/$'…' quoting. Values are substituted locally into placeholders that
+  # are then base64'd — no metacharacters reach the remote command line. This
+  # uses `cat < file` instead of a heredoc inside $(...) because the latter fails
+  # under macOS bash 3.2.
+  REMOTE_SCRIPT="$(cat "$SCRIPT_DIR/remote-helper-install.sh")"
   REMOTE_SCRIPT="${REMOTE_SCRIPT//__REMOTE_DIR__/$REMOTE_DIR}"
   REMOTE_SCRIPT="${REMOTE_SCRIPT//__REMOTE_ROOT__/$REMOTE_ROOT}"
   REMOTE_SCRIPT="${REMOTE_SCRIPT//__ALLOW__/$ALLOW}"

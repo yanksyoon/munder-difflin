@@ -41,8 +41,9 @@ test('the Mac setup script validates the alias and transports remote values safe
   assert.match(setup, /\| base64 -d \| bash/, 'remote command is the fixed POSIX pipe');
   assert.match(setup, /REMOTE_B64=/, 'script is base64-encoded');
   assert.match(setup, /__REMOTE_DIR__/, 'placeholders are substituted into the script');
-  assert.match(setup, /printf 'export MUNDER_REMOTE_ROOT=%q/, 'wrapper is written with printf %q (decoded values, quoted)');
-  assert.doesNotMatch(setup, /QUOTED_SCRIPT/, 'no %q-quoted bash -c form remains');
+  assert.match(setup, /remote-helper-install\.sh/, 'remote installer is a committed file');
+  const installer = read('tools/remote-helper-install.sh');
+  assert.match(installer, /printf 'export MUNDER_REMOTE_ROOT=%q/, 'wrapper is written with printf %q (decoded values, quoted)');
   assert.doesNotMatch(setup, /ssh -[^ ]* "\$ALIAS"/, 'alias is never passed as an option');
 });
 
