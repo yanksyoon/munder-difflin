@@ -102,29 +102,20 @@ FORK_URL=$FORK_URL
 BRANCH=$BRANCH
 PAYLOAD_SRC
 )"
-  # Build the remote script as text, then pass it as a `bash -c` ARGUMENT via
-  # printf %q. stdin is never used by the remote command, and the payload is an
-  # environment variable (single-line base64, safe alphabet). Nothing from the
-  # local shell is interpolated into command text except the %q-quoted script.
+  # Build the remote script as text, base64-encode it, and run it through a
+  # FIXED, POSIX-safe remote command:  printf '%s' '<b64>' | base64 -d | bash
+  # The remote login shell (often /bin/sh/dash) only parses this one line — no
+  # Bash %q/$'…' syntax — and `bash` is always present as an executable upstream.
+  # The script payload itself is single-line base64 (safe alphabet).
   REMOTE_SCRIPT="$(cat <<'REMOTE_SCRIPT'
 set -euo pipefail
-# Decode the embedded payload env var (single line, safe alphabet).
-PAYLOAD="$(printf '%s' "$PAYLOAD_B64" | base64 -d)"
-# Parse KEY=VALUE lines positionally (no Bash-4 associative arrays; works on
-# macOS /bin/bash 3.2 and Ubuntu).
-REMOTE_DIR=""; REMOTE_ROOT=""; ALLOW=""; FORK_URL=""; BRANCH=""
-IFS='
-'
-for _l in $PAYLOAD; do
-  case "$_l" in
-    REMOTE_DIR=*) REMOTE_DIR="${_l#REMOTE_DIR=}" ;;
-    REMOTE_ROOT=*) REMOTE_ROOT="${_l#REMOTE_ROOT=}" ;;
-    ALLOW=*) ALLOW="${_l#ALLOW=}" ;;
-    FORK_URL=*) FORK_URL="${_l#FORK_URL=}" ;;
-    BRANCH=*) BRANCH="${_l#BRANCH=}" ;;
-  esac
-done
-IFS=$' \t\n'
+# Decode the base64 script stream from stdin (see caller for the transport).
+# Values are carried inside the script as KEY=VALUE assignments, validated below.
+REMOTE_DIR=__REMOTE_DIR__
+REMOTE_ROOT=__REMOTE_ROOT__
+ALLOW=__ALLOW__
+FORK_URL=__FORK_URL__
+BRANCH=__BRANCH__
 [ -n "$REMOTE_DIR" ] && [ -n "$REMOTE_ROOT" ] && [ -n "$ALLOW" ] || { echo "missing remote payload" >&2; exit 2; }
 case "$REMOTE_DIR" in *[!A-Za-z0-9_./~-]*) echo "unsafe REMOTE_DIR" >&2; exit 2;; esac
 case "$REMOTE_ROOT" in *[!A-Za-z0-9_./~-]*) echo "unsafe REMOTE_ROOT" >&2; exit 2;; esac
@@ -155,11 +146,15 @@ chmod 700 "$BIN_DIR/munder-remote"
 echo "  helper wrapper: $BIN_DIR/munder-remote"
 REMOTE_SCRIPT
 )"
-  QUOTED_SCRIPT="$(printf '%q' "$REMOTE_SCRIPT")"
-  ssh -o BatchMode=yes -T -- "$ALIAS" "PAYLOAD_B64='$PAYLOAD_B64' bash -c $QUOTED_SCRIPT"
-  [ $? -eq 0 ] || die "Remote helper install failed (rc=$?)"
-else
-  say "Skipping remote helper install (MD_SKIP_REMOTE=1)"
+  # Substitute the payload values (all validated: alias/APP_DIR/paths/allowlist)
+  # into the script, then base64 the whole thing.
+  REMOTE_SCRIPT="${REMOTE_SCRIPT//__REMOTE_DIR__/$REMOTE_DIR}"
+  REMOTE_SCRIPT="${REMOTE_SCRIPT//__REMOTE_ROOT__/$REMOTE_ROOT}"
+  REMOTE_SCRIPT="${REMOTE_SCRIPT//__ALLOW__/$ALLOW}"
+  REMOTE_SCRIPT="${REMOTE_SCRIPT//__FORK_URL__/$FORK_URL}"
+  REMOTE_SCRIPT="${REMOTE_SCRIPT//__BRANCH__/$BRANCH}"
+  REMOTE_B64="$(printf '%s' "$REMOTE_SCRIPT" | base64 | tr -d '\n')"
+  ssh -o BatchMode=yes -T -- "$ALIAS" "printf '%s' '$REMOTE_B64' | base64 -d | bash"
 fi
 HELPER_PATH="$REMOTE_HOME/bin/munder-remote"
 
