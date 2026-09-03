@@ -203,3 +203,41 @@ test('remote helper lists directories, reads files, and reports git status withi
   assert.equal(git.op, 'git_status');
   assert.equal(typeof git.payload.output, 'string');
 });
+
+test('remote fs and git ops reject symlink escapes outside the root', async (t) => {
+  const { RemoteHelper } = loadTs('src/remote/remoteHelper.ts');
+  const { FrameDecoder } = loadTs('src/shared/remoteProtocol.ts');
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'md-remote-sym-'));
+  const root = path.join(base, 'root');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(root);
+  fs.mkdirSync(outside);
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'OUTSIDE_SECRET', 'utf8');
+  fs.symlinkSync(outside, path.join(root, 'link'), 'dir');
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const frames = [];
+  const output = new (require('node:stream').PassThrough)();
+  output._write = function (chunk, _enc, cb) { this.emit('frame', chunk); cb(); };
+  output.on('frame', (chunk) => frames.push(chunk));
+  const helper = new RemoteHelper({ root, commands: ['printf'], output });
+  const dec = new FrameDecoder();
+  const capture = (requestId) => new Promise((resolve) => {
+    const timer = setInterval(() => {
+      for (const frame of frames) {
+        for (const message of dec.push(frame)) {
+          if (message.requestId === requestId) { clearInterval(timer); resolve(message); return; }
+        }
+      }
+    }, 10);
+  });
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'r', op: 'fs_read', payload: { path: 'link/secret.txt' } });
+  const read = await capture('r');
+  assert.equal(read.op, 'error');
+  assert.match(read.payload.message, /symlink/);
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'l', op: 'fs_list', payload: { path: 'link' } });
+  const listing = await capture('l');
+  assert.equal(listing.op, 'error');
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'g', op: 'git_status', payload: { path: 'link' } });
+  const git = await capture('g');
+  assert.equal(git.op, 'error');
+});

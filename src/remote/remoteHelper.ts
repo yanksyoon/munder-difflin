@@ -1,6 +1,6 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
-import { existsSync, realpathSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import {
@@ -12,6 +12,7 @@ const MAX_ARGUMENT_BYTES = 16 * 1024;
 const BLOCKED_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'env', 'busybox', 'xargs', 'find', 'node', 'npm', 'python', 'python3', 'perl', 'ruby', 'ssh', 'sudo', 'curl', 'wget']);
 const MAX_SESSIONS = 16;
 const MAX_TEXT_BYTES = 256 * 1024;
+const MAX_LIST_ENTRIES = 1000;
 const MAX_BUFFERED_EVENTS = 2048;
 const MAX_BUFFERED_SESSIONS = 64;
 
@@ -76,6 +77,7 @@ export class RemoteHelper {
   private readonly maxSnapshotBytes: number;
   private readonly sessions = new Map<string, Session>();
   private readonly buffers = new Map<string, EventBuffer>();
+  private stopped = false;
 
   constructor(options: RemoteHelperOptions = {}) {
     const root = options.root ?? process.env.MUNDER_REMOTE_ROOT;
@@ -144,13 +146,17 @@ export class RemoteHelper {
     });
   }
 
-  private validateRelativePath(value: unknown): { rel: string; abs: string } {
+  private validateRelativePath(value: unknown, requireExists = true): { rel: string; abs: string } {
     if (typeof value !== 'string' || !value || value.includes('\0')) throw new Error('invalid path');
     const rel = value.startsWith('/') ? value.slice(1) : value;
-    if (!isWithinRemoteRoot(this.root, join(this.root, rel))) throw new Error('path escapes remote root');
-    const abs = join(this.root, rel);
-    if (!existsSync(abs)) throw new Error('path does not exist');
-    return { rel, abs };
+    const joined = join(this.root, rel);
+    if (!isWithinRemoteRoot(this.root, joined)) throw new Error('path escapes remote root');
+    // Canonicalize the FULL resolved path so a symlink inside the root cannot
+    // redirect the read/git below to a directory outside it.
+    const canonical = realpathSync(joined);
+    if (!isWithinRemoteRoot(this.root, canonical)) throw new Error('path escapes remote root via symlink');
+    if (requireExists && !existsSync(canonical)) throw new Error('path does not exist');
+    return { rel, abs: canonical };
   }
 
   private fsList(request: RemoteMessage): void {
@@ -159,10 +165,12 @@ export class RemoteHelper {
       const dir = typeof payload.path === 'string' && payload.path ? payload.path : '.';
       const { abs } = this.validateRelativePath(dir);
       if (!statSync(abs).isDirectory()) throw new Error('not a directory');
-      const entries = readdirSync(abs, { withFileTypes: true })
+      let listed = readdirSync(abs, { withFileTypes: true })
         .map((entry) => ({ name: entry.name, directory: entry.isDirectory() }))
         .sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
-      this.respond(request, 'fs_list', { path: dir, entries });
+      const truncated = listed.length > MAX_LIST_ENTRIES;
+      if (truncated) listed = listed.slice(0, MAX_LIST_ENTRIES);
+      this.respond(request, 'fs_list', { path: dir, entries: listed, truncated });
     } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
   }
 
@@ -172,11 +180,20 @@ export class RemoteHelper {
       const path = payload.path;
       if (typeof path !== 'string' || !path) { this.send(errorMessage(request, 'invalid path')); return; }
       const { abs } = this.validateRelativePath(path);
-      const st = statSync(abs);
-      if (!st.isFile()) { this.send(errorMessage(request, 'not a file')); return; }
-      if (st.size > MAX_TEXT_BYTES) { this.send(errorMessage(request, 'file too large')); return; }
-      const content = readFileSync(abs, 'utf8');
-      this.respond(request, 'fs_read', { path, bytes: st.size, content });
+      const fd = openSync(abs, 'r');
+      try {
+        const st = fstatSync(fd);
+        if (!st.isFile()) { this.send(errorMessage(request, 'not a file')); return; }
+        // Bounded read: never slurp more than MAX_TEXT_BYTES+1 regardless of what the
+        // stat says (the file could have grown between check and read).
+        const buffer = Buffer.alloc(MAX_TEXT_BYTES + 1);
+        const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+        if (bytesRead > MAX_TEXT_BYTES) { this.send(errorMessage(request, 'file too large')); return; }
+        const content = buffer.subarray(0, bytesRead).toString('utf8');
+        this.respond(request, 'fs_read', { path, bytes: bytesRead, content });
+      } finally {
+        closeSync(fd);
+      }
     } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
   }
 
@@ -185,11 +202,16 @@ export class RemoteHelper {
       const args = op === 'git_status' ? ['status', '--short', '--branch'] : ['log', '--oneline', '-n', '20'];
       execFile('git', args, { cwd: cwdAbs, timeout: 10_000, maxBuffer: MAX_TEXT_BYTES, windowsHide: true },
         (error, stdout, stderr) => {
-          if (error && error.code !== 1) {
-            this.send(errorMessage(request, `git failed: ${(stderr || error.message).slice(0, 2000)}`));
-            return;
+          if (this.stopped) return;
+          try {
+            if (error && error.code !== 1) {
+              this.send(errorMessage(request, `git failed: ${(stderr || error.message).slice(0, 2000)}`));
+              return;
+            }
+            this.respond(request, op, { path: cwdRel, output: (stdout + (error ? '\n' + stderr : '')).slice(0, MAX_TEXT_BYTES) });
+          } catch (sendError) {
+            // Peer disconnected or backpressure while git was finishing; nothing more to do.
           }
-          this.respond(request, op, { path: cwdRel, output: (stdout + (error ? '\n' + stderr : '')).slice(0, MAX_TEXT_BYTES) });
         });
     } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
   }
@@ -258,6 +280,7 @@ export class RemoteHelper {
   }
 
   stop(): void {
+    this.stopped = true;
     for (const session of this.sessions.values()) {
       try { session.proc.kill(); } catch { /* already exited */ }
     }

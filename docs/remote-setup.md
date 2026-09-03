@@ -26,9 +26,10 @@ This fork adds the SSH remote agent transport plus the Phase 3 session plane:
 - The Mac connection runs a 30-second heartbeat ping; a helper that stops answering is
   closed and surfaces a disconnect instead of hanging silently.
 - Remote file and git browsing are available inside the panel: list directories, read text
-  files (256 KiB cap, confined to `MUNDER_REMOTE_ROOT`), and run `git status` / `git log`
-  in a project under the root. All file and git access stays on the remote host; nothing
-  is copied to the Mac.
+  files (256 KiB cap), and run `git status` / `git log` in a project under the root. Every
+  fs/git path is canonicalized (`realpath`) and re-checked against `MUNDER_REMOTE_ROOT`, so
+  a symlink inside the root cannot redirect access outside it. All file and git access stays
+  on the remote host; nothing is copied to the Mac.
 
 This slice is intentionally not a public web dashboard. It does not expose a TCP port or
 move secrets to the Mac. Remote agents and remote file/git browsing are controlled from
