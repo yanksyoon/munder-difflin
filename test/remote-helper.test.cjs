@@ -325,3 +325,31 @@ test('git browsing does not execute repository-configured clean filters', async 
   assert.equal(git.op, 'git_status');
   assert.equal(fs.existsSync(marker), false, 'git browsing must not execute repo clean filters');
 });
+
+test('fs_list truncates at the scan cap and reports it', async (t) => {
+  const { RemoteHelper } = loadTs('src/remote/remoteHelper.ts');
+  const { FrameDecoder } = loadTs('src/shared/remoteProtocol.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-remote-cap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const name of ['a', 'b', 'c', 'd']) fs.writeFileSync(path.join(root, name), 'x');
+  const frames = [];
+  const output = new (require('node:stream').PassThrough)();
+  output._write = function (chunk, _enc, cb) { this.emit('frame', chunk); cb(); };
+  output.on('frame', (chunk) => frames.push(chunk));
+  const helper = new RemoteHelper({ root, commands: ['printf'], output, maxListScan: 2 });
+  const dec = new FrameDecoder();
+  const capture = (requestId) => new Promise((resolve) => {
+    const timer = setInterval(() => {
+      for (const frame of frames) {
+        for (const message of dec.push(frame)) {
+          if (message.requestId === requestId) { clearInterval(timer); resolve(message); return; }
+        }
+      }
+    }, 10);
+  });
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'l', op: 'fs_list', payload: {} });
+  const listing = await capture('l');
+  assert.equal(listing.op, 'fs_list');
+  assert.ok(listing.payload.entries.length <= 2, 'entries must respect the scan cap');
+  assert.equal(listing.payload.truncated, true, 'scan-capped listing must be flagged truncated');
+});

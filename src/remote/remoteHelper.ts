@@ -1,6 +1,6 @@
 import * as pty from 'node-pty';
 import { randomUUID } from 'node:crypto';
-import { existsSync, realpathSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
+import { existsSync, realpathSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync, fstatSync, opendirSync } from 'node:fs';
 import { execFile, execFileSync } from 'node:child_process';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import {
@@ -13,6 +13,7 @@ const BLOCKED_COMMANDS = new Set(['sh', 'bash', 'zsh', 'fish', 'dash', 'ksh', 'e
 const MAX_SESSIONS = 16;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_LIST_ENTRIES = 1000;
+const MAX_LIST_SCAN = 50_000;
 const MAX_BUFFERED_EVENTS = 2048;
 const MAX_BUFFERED_SESSIONS = 64;
 
@@ -24,6 +25,8 @@ export interface RemoteHelperOptions {
   maxBufferedBytes?: number;
   /** Byte cap for one snapshot response (default 1 MiB). */
   maxSnapshotBytes?: number;
+  /** Hard cap on entries scanned for a directory listing (default 50k). */
+  maxListScan?: number;
 }
 
 interface Session {
@@ -75,6 +78,7 @@ export class RemoteHelper {
   private readonly output: NodeJS.WritableStream;
   private readonly maxBufferedBytes: number;
   private readonly maxSnapshotBytes: number;
+  private readonly maxListScan: number;
   private readonly sessions = new Map<string, Session>();
   private readonly buffers = new Map<string, EventBuffer>();
   private stopped = false;
@@ -91,6 +95,7 @@ export class RemoteHelper {
     this.output = options.output ?? process.stdout;
     this.maxBufferedBytes = options.maxBufferedBytes ?? 1024 * 1024;
     this.maxSnapshotBytes = options.maxSnapshotBytes ?? 1024 * 1024;
+    this.maxListScan = options.maxListScan ?? MAX_LIST_SCAN;
   }
 
   private send(message: RemoteMessage): void {
@@ -165,12 +170,25 @@ export class RemoteHelper {
       const dir = typeof payload.path === 'string' && payload.path ? payload.path : '.';
       const { abs } = this.validateRelativePath(dir);
       if (!statSync(abs).isDirectory()) throw new Error('not a directory');
-      let listed = readdirSync(abs, { withFileTypes: true })
-        .map((entry) => ({ name: entry.name, directory: entry.isDirectory() }))
-        .sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
-      const truncated = listed.length > MAX_LIST_ENTRIES;
-      if (truncated) listed = listed.slice(0, MAX_LIST_ENTRIES);
-      this.respond(request, 'fs_list', { path: dir, entries: listed, truncated });
+      // Incremental, bounded enumeration: never materialize/sort a giant
+      // directory. Walk entries one at a time up to maxListScan, then sort and
+      // slice to the response cap; a cap hit is reported as truncated.
+      const entries: Array<{ name: string; directory: boolean }> = [];
+      const handle = opendirSync(abs);
+      try {
+        while (entries.length < this.maxListScan) {
+          const entry = handle.readSync();
+          if (!entry) break;
+          entries.push({ name: entry.name, directory: entry.isDirectory() });
+        }
+      } finally {
+        handle.closeSync();
+      }
+      let truncated = entries.length >= this.maxListScan;
+      entries.sort((a, b) => Number(b.directory) - Number(a.directory) || a.name.localeCompare(b.name));
+      const limited = entries.slice(0, MAX_LIST_ENTRIES);
+      if (entries.length > MAX_LIST_ENTRIES) truncated = true;
+      this.respond(request, 'fs_list', { path: dir, entries: limited, truncated });
     } catch (error) { this.send(errorMessage(request, error instanceof Error ? error.message : String(error))); }
   }
 
