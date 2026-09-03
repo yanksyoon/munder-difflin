@@ -22,6 +22,7 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web && npm run typecheck:remote",
     "build:remote": "tsc -p tsconfig.remote.json",
     "test:remote": "npm run build:remote && node --test test/remote-protocol.test.cjs test/ssh-remote.test.cjs test/remote-helper.test.cjs test/remote-backend.test.cjs test/remote-wiring.test.cjs",
+    "remote:setup": "bash tools/mac-remote-setup.sh",
     "test:focused": "npm run build:remote && node --test test/*.test.cjs",
     "check:links": "node tools/check-release-links.cjs",
     "dist": "npm run build && electron-builder",

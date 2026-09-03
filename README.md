@@ -96,6 +96,7 @@ can run here.
   <a href="https://opencode.ai/docs"><kbd>OpenCode</kbd></a>
   <a href="https://github.com/charmbracelet/crush"><kbd>Crush · Charm</kbd></a>
   <a href="https://pi.dev/docs/latest"><kbd>Pi</kbd></a>
+  <a href="https://github.com/prime-intellect-ai/prime-agent"><kbd>Prime Agent</kbd></a>
   <a href="https://docs.github.com/copilot/concepts/agents/about-copilot-cli"><kbd>GitHub Copilot</kbd></a>
   <a href="https://cursor.com/docs/cli/install"><kbd>Cursor</kbd></a>
   <kbd>+ any custom command</kbd>

@@ -33,6 +33,7 @@ const CLIS: Array<{ id: AgentProvider; label: string; hint: string }> = [
   { id: 'opencode', label: 'OpenCode', hint: 'http://localhost:11434/v1 (Ollama) — injected as a local provider' },
   { id: 'crush', label: 'Crush', hint: 'OpenAI-compatible endpoint — used as the proxy upstream' },
   { id: 'pi', label: 'Pi', hint: 'local models are file-based (models.json); base-URL reserved' },
+  { id: 'prime-agent', label: 'Prime Agent', hint: 'BYOK keys/logins configured in its own TUI (/login, /model)' },
   { id: 'qwen', label: 'Qwen', hint: 'OpenAI-compatible endpoint — used as the proxy upstream' }
 ];
 

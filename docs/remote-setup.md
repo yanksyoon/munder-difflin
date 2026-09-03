@@ -72,7 +72,7 @@ native module must not be copied to Linux. Verify the helper artifact:
 
 ```bash
 export MUNDER_REMOTE_ROOT=/home/ubuntu
-export MUNDER_REMOTE_ALLOW_COMMANDS=claude,codex,gemini,opencode,crush,pi
+export MUNDER_REMOTE_ALLOW_COMMANDS=claude,codex,gemini,opencode,crush,pi,prime-agent
 node tools/remote-helper-launcher.cjs < /dev/null
 ```
 
@@ -94,7 +94,7 @@ those variables and runs the launcher. For example, `/home/ubuntu/bin/munder-rem
 #!/bin/sh
 set -eu
 export MUNDER_REMOTE_ROOT=/home/ubuntu
-export MUNDER_REMOTE_ALLOW_COMMANDS=claude,codex,gemini,opencode,crush,pi
+export MUNDER_REMOTE_ALLOW_COMMANDS=claude,codex,gemini,opencode,crush,pi,prime-agent
 exec /usr/bin/node /home/ubuntu/munder-difflin/tools/remote-helper-launcher.cjs
 ```
 
@@ -182,7 +182,21 @@ The Mac does not need the provider CLI or provider credentials for a remote sess
 stay on `work`. The Mac needs its `~/.ssh/config` alias and key-based access as configured
 above. SSH agent forwarding is not required and should remain disabled.
 
-## Manual protocol smoke test
+## One-shot Mac setup script
+
+For a fully scripted end-to-end install, run this on the Mac (it reuses your existing
+SSH config alias, installs/refreshes the remote helper over SSH, builds the app, launches
+it, and prints the in-app walkthrough):
+
+```bash
+bash tools/mac-remote-setup.sh <your-ssh-alias>
+# or: npm run remote:setup
+```
+
+Environment overrides are documented in the script header (`MD_ALIAS`, `MD_APP_DIR`,
+`MD_REMOTE_DIR`, `MD_REMOTE_ROOT`, `MD_ALLOW_COMMANDS`, `MD_BUILD_MAC`,
+`MD_SKIP_REMOTE`). The default provider allowlist now includes `prime-agent`.
+
 
 The helper is a framed stdio service, not an interactive shell. The repository's remote
 focused tests exercise the complete helper lifecycle with a disposable PTY:

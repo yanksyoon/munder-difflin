@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const loadTs = require('./load-ts.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -20,6 +21,14 @@ test('remote transport is reachable only through explicit main/preload seams', (
   assert.doesNotMatch(main, /ptyManager\.spawn\(.*remote/i);
 });
 
+test('prime-agent is a recognized provider and an allowed remote command', () => {
+  const { inferAgentProvider, providerPreset, isAgentProvider, AGENT_PROVIDER_PRESETS } = loadTs('src/shared/agentProvider.ts');
+  assert.equal(isAgentProvider('prime-agent'), true);
+  assert.equal(inferAgentProvider('prime-agent --model x'), 'prime-agent');
+  assert.equal(providerPreset('prime-agent').defaultCommand, 'prime-agent');
+  assert.ok(AGENT_PROVIDER_PRESETS.some((p) => p.id === 'prime-agent'));
+});
+
 test('remote setup documents the actual SSH and host bootstrap contract', () => {
   const docs = read('docs/remote-setup.md');
   assert.match(docs, /npm rebuild node-pty/);
@@ -27,4 +36,9 @@ test('remote setup documents the actual SSH and host bootstrap contract', () => 
   assert.match(docs, /MUNDER_REMOTE_ALLOW_COMMANDS/);
   assert.match(docs, /StrictHostKeyChecking=no/);
   assert.match(docs, /remote-helper-launcher/);
+  assert.match(docs, /prime-agent/);
+  const setupScript = read('tools/mac-remote-setup.sh');
+  assert.match(setupScript, /remote-ui-plan/);
+  assert.match(setupScript, /prime-agent/);
+  assert.match(setupScript, /npm run dev/);
 });

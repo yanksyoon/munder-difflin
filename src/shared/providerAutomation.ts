@@ -131,6 +131,13 @@ const CONTEXT_COMMANDS: Record<AgentProvider, ProviderContextCommands> = {
   // where optional instructions focus the summary". There is no `/clear`.
   pi: { compact: '/compact', clear: '/new', compactTakesFocus: true },
 
+  // Prime Agent is a pi-mono fork; in principle it shares pi's `/compact` (with
+  // optional focus) and `/new`. Its exact slash table is NOT verified against a
+  // frozen binary in-repo, so we prefer null over typing into a live TUI that
+  // might parse the line differently. Revisit when a shipped command table is
+  // transcribed (see the cursor/custom reasoning above).
+  'prime-agent': NO_CONTEXT_COMMANDS,
+
   // Copilot's INTERACTIVE mode does have `/compact [FOCUS-INSTRUCTIONS]` and
   // `/clear` — but this app never runs it interactively. The preset spawns it in
   // print mode (`initialPromptFlag: '-p'`, `canReceiveInbox: false`), which runs

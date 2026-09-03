@@ -32,6 +32,7 @@ export type AgentProvider =
   | 'opencode'
   | 'crush'
   | 'pi'
+  | 'prime-agent'
   | 'copilot'
   | 'cursor'
   | 'custom';
@@ -496,6 +497,27 @@ export const AGENT_PROVIDER_PRESETS: AgentProviderPreset[] = [
     docsUrl: 'https://pi.dev/docs/latest'
   },
   {
+    // Prime Agent (https://github.com/prime-intellect-ai/prime-agent) — a
+    // pi-mono fork (terminal-first TUI, BYOK providers). Supported as a plain
+    // terminal provider: it is NOT wired to the pi hook-bridge extension, because
+    // prime-agent's plugin surface is unverified in this repo. That means no
+    // lifecycle hooks and no inbox delivery — it runs like a custom command with
+    // a first-class picker entry. Flags are deliberately conservative: commands
+    // and models are chosen inside its own TUI (`/model`, `/login`), so no
+    // model/auto flag is injected here.
+    id: 'prime-agent',
+    label: 'Prime Agent',
+    defaultCommand: 'prime-agent',
+    commandGroups: [],
+    // Inherited pi environment suppression; best-effort, harmless if unused.
+    nonInteractiveEnv: { PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0' },
+    autoModeFlag: '',
+    supportsModel: false,
+    hiveAware: false,
+    canReceiveInbox: false,
+    docsUrl: 'https://github.com/prime-intellect-ai/prime-agent'
+  },
+  {
     // GitHub Copilot CLI (`copilot`, npm @github/copilot). Driven in print mode:
     // `copilot -p "<prompt>" -s --allow-all-tools --no-ask-user [--model]`, the
     // documented non-interactive shape (single prompt, clean stdout, exits when
@@ -589,6 +611,7 @@ export function isAgentProvider(value: unknown): value is AgentProvider {
     value === 'opencode' ||
     value === 'crush' ||
     value === 'pi' ||
+    value === 'prime-agent' ||
     value === 'copilot' ||
     value === 'cursor' ||
     value === 'custom'
@@ -641,6 +664,7 @@ export function inferAgentProvider(command: string | undefined, explicit?: unkno
   if (bin === 'opencode') return 'opencode';
   if (bin === 'crush') return 'crush';
   if (bin === 'pi') return 'pi';
+  if (bin === 'prime-agent' || bin === 'prime') return 'prime-agent';
   if (bin === 'copilot') return 'copilot';
   // Cursor ships as `cursor-agent`; `agent` is a shorter alias (generic name — check last).
   if (bin === 'cursor-agent') return 'cursor';
