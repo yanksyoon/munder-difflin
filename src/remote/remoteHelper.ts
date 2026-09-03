@@ -17,6 +17,10 @@ export interface RemoteHelperOptions {
   root?: string;
   commands?: string[];
   output?: NodeJS.WritableStream;
+  /** Byte cap for a single session's replay buffer (default 1 MiB). */
+  maxBufferedBytes?: number;
+  /** Byte cap for one snapshot response (default 1 MiB). */
+  maxSnapshotBytes?: number;
 }
 
 interface Session {
@@ -30,6 +34,7 @@ interface Session {
 interface EventBuffer {
   startSeq: number;
   events: RemoteMessage[];
+  bytes: number;
 }
 
 function payloadOf(message: RemoteMessage): Record<string, unknown> {
@@ -64,6 +69,8 @@ export class RemoteHelper {
   private readonly root: string;
   private readonly commands: readonly string[];
   private readonly output: NodeJS.WritableStream;
+  private readonly maxBufferedBytes: number;
+  private readonly maxSnapshotBytes: number;
   private readonly sessions = new Map<string, Session>();
   private readonly buffers = new Map<string, EventBuffer>();
 
@@ -77,6 +84,8 @@ export class RemoteHelper {
     if (!configuredCommands || configuredCommands.length === 0) throw new Error('MUNDER_REMOTE_ALLOW_COMMANDS is required');
     this.commands = configuredCommands;
     this.output = options.output ?? process.stdout;
+    this.maxBufferedBytes = options.maxBufferedBytes ?? 1024 * 1024;
+    this.maxSnapshotBytes = options.maxSnapshotBytes ?? 1024 * 1024;
   }
 
   private send(message: RemoteMessage): void {
@@ -97,14 +106,18 @@ export class RemoteHelper {
   private recordEvent(sessionId: string, event: RemoteMessage): void {
     let buffer = this.buffers.get(sessionId);
     if (!buffer) {
-      buffer = { startSeq: event.seq ?? 0, events: [] };
+      buffer = { startSeq: event.seq ?? 0, events: [], bytes: 0 };
       this.buffers.set(sessionId, buffer);
     }
     buffer.events.push(event);
-    if (buffer.events.length > MAX_BUFFERED_EVENTS) {
-      buffer.events.shift();
-      buffer.startSeq = buffer.events[0]?.seq ?? buffer.startSeq;
+    buffer.bytes += Buffer.byteLength(JSON.stringify(event), 'utf8');
+    // Bound by count AND bytes so a large-output session cannot balloon memory.
+    while ((buffer.events.length > MAX_BUFFERED_EVENTS || buffer.bytes > this.maxBufferedBytes)
+      && buffer.events.length > 1) {
+      const dropped = buffer.events.shift() as RemoteMessage;
+      buffer.bytes -= Buffer.byteLength(JSON.stringify(dropped), 'utf8');
     }
+    buffer.startSeq = buffer.events[0]?.seq ?? buffer.startSeq;
     if (this.buffers.size > MAX_BUFFERED_SESSIONS) {
       const oldest = this.buffers.keys().next().value;
       if (oldest !== undefined) this.buffers.delete(oldest);
@@ -217,8 +230,22 @@ export class RemoteHelper {
           const buffer = id ? this.buffers.get(id) : undefined;
           const sinceSeq = typeof payload.sinceSeq === 'number' && Number.isSafeInteger(payload.sinceSeq) && payload.sinceSeq >= 0
             ? payload.sinceSeq : 0;
-          const events = buffer ? buffer.events.filter((event) => (event.seq ?? 0) >= sinceSeq) : [];
-          this.respond(request, 'snapshot', { session: session ? this.sessionInfo(session) : null, events });
+          const selected = buffer ? buffer.events.filter((event) => (event.seq ?? 0) >= sinceSeq) : [];
+          const events: RemoteMessage[] = [];
+          let bytes = 0;
+          let truncated = false;
+          for (const event of selected) {
+            const eventBytes = Buffer.byteLength(JSON.stringify(event), 'utf8');
+            if (bytes + eventBytes > this.maxSnapshotBytes && events.length > 0) { truncated = true; break; }
+            events.push(event);
+            bytes += eventBytes;
+          }
+          this.respond(request, 'snapshot', {
+            session: session ? this.sessionInfo(session) : null,
+            events,
+            startSeq: buffer ? buffer.startSeq : sinceSeq,
+            truncated
+          });
           return;
         }
         case 'input': {

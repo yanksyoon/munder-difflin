@@ -10,14 +10,21 @@ This fork adds the SSH remote agent transport plus the Phase 3 session plane:
 - `src/main/sshRemote.ts` starts the helper through OpenSSH, correlates requests, validates
   responses/events, and pings a heartbeat so a stalled helper is detected.
 - `src/main/remoteBackend.ts` is the session registry + terminal adapter: it maps helper
-  sessions to logical ids (`remote:<sessionId>`) and forwards output/exit into the existing
-  terminal channels so the renderer can consume remote streams without touching local
-  `pty:*`/restore state.
+  sessions to logical ids (`remote:<sessionId>`), validates session metadata, and forwards
+  every raw event plus decoded output/exit into the existing terminal channels so the
+  renderer can consume remote streams without touching local `pty:*`/restore state.
 - `remote:*` Electron IPC methods expose connect, disconnect, list, refresh, start, attach,
   snapshot (replay), input, resize, signal, close, and event/status delivery without
   changing local `pty:*` behavior.
 - The Settings → Connections panel adds Reconnect, Reload sessions, and Replay; after a
-  reconnect it restores the helper's live sessions and replays their buffered output.
+  reconnect it restores the helper's live sessions and replays their buffered output,
+  deduplicated by event sequence so live bytes are never appended twice.
+- The helper's per-session replay buffer is byte-bounded (1 MiB default) and snapshots are
+  byte-bounded too, so a long-running session can never build a replay response that blows
+  the protocol frame limit. Evicted history surfaces a `startSeq` gap and a `truncated`
+  flag instead of silently returning nothing.
+- The Mac connection runs a 30-second heartbeat ping; a helper that stops answering is
+  closed and surfaces a disconnect instead of hanging silently.
 
 This slice is intentionally not a public web dashboard. It does not expose a TCP port or
 move secrets to the Mac. Remote agents are not yet merged into the local floor/hive

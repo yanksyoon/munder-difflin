@@ -40,6 +40,7 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
   const [connected, setConnected] = useState(false);
   const [note, setNote] = useState('');
   const decoders = useRef(new Map<string, TextDecoder>());
+  const lastSeq = useRef(new Map<string, number>());
 
   const refresh = async (): Promise<void> => {
     const result = await window.cth.remoteRefresh();
@@ -48,21 +49,30 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
   };
 
   /** Replay a session's buffered output so a reconnect never starts blank. */
+  const appendOutput = (id: string, event: RemoteMessage, base64: string): void => {
+    const seq = event.seq ?? 0;
+    const applied = lastSeq.current.get(id);
+    if (applied !== undefined && seq <= applied) return; // already seen live or replayed
+    lastSeq.current.set(id, seq);
+    try {
+      const decoder = decoders.current.get(id) ?? (() => { const next = new TextDecoder(); decoders.current.set(id, next); return next; })();
+      const text = decodeBase64(base64, decoder);
+      setOutput((prev) => ({ ...prev, [id]: ((prev[id] ?? '') + text).slice(-1_000_000) }));
+    } catch { setNote('invalid remote output'); }
+  };
+
   const replay = async (sessionId: string): Promise<void> => {
     const result = await window.cth.remoteSnapshot(sessionId);
     if (!result.ok || !result.response) return;
-    const events = (result.response.payload as { events?: RemoteMessage[] } | undefined)?.events ?? [];
+    const payload = result.response.payload as { events?: RemoteMessage[]; startSeq?: number; truncated?: boolean } | undefined;
     const id = logicalId(sessionId);
-    for (const event of events) {
+    for (const event of payload?.events ?? []) {
       if (event.op !== 'output') continue;
       const data = (event.payload as { data?: unknown } | undefined)?.data;
       if (typeof data !== 'string') continue;
-      try {
-        const decoder = decoders.current.get(id) ?? (() => { const next = new TextDecoder(); decoders.current.set(id, next); return next; })();
-        const text = decodeBase64(data, decoder);
-        setOutput((prev) => ({ ...prev, [id]: ((prev[id] ?? '') + text).slice(-1_000_000) }));
-      } catch { /* malformed event; ignore */ }
+      appendOutput(id, event, data);
     }
+    if (payload?.truncated) setNote('session output is truncated; earlier events were evicted');
   };
 
   useEffect(() => {
@@ -71,18 +81,13 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
       const id = logicalId(message.sessionId);
       if (message.op === 'output') {
         const data = (message.payload as { data?: unknown } | undefined)?.data;
-        if (typeof data === 'string') {
-          try {
-            const decoder = decoders.current.get(id) ?? (() => { const next = new TextDecoder(); decoders.current.set(id, next); return next; })();
-            const text = decodeBase64(data, decoder);
-            setOutput((prev) => ({ ...prev, [id]: ((prev[id] ?? '') + text).slice(-1_000_000) }));
-          } catch { setNote('invalid remote output'); }
-        }
+        if (typeof data === 'string') appendOutput(id, message, data);
       } else if (message.op === 'exit') {
         const decoder = decoders.current.get(id);
         const tail = decoder?.decode() ?? '';
         if (tail) setOutput((prev) => ({ ...prev, [id]: (prev[id] ?? '') + tail }));
         decoders.current.delete(id);
+        lastSeq.current.delete(id);
         setSessions((prev) => prev.filter((session) => session.id !== message.sessionId));
       }
     });
@@ -163,7 +168,7 @@ export function RemoteConnectionSettings({ config }: { config: HarnessConfig }) 
               <PixelButton variant="destructive" size="sm" onClick={() => void closeSession(session.id)}>Close</PixelButton>
             </div>
             {selected === session.id && <>
-              <pre style={{ margin: 0, padding: 8, minHeight: 80, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', background: 'var(--cth-paper-200)', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-mono)', fontSize: 13 }}>{output[session.id] ?? ''}</pre>
+              <pre style={{ margin: 0, padding: 8, minHeight: 80, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap', background: 'var(--cth-paper-200)', color: 'var(--cth-ink-900)', fontFamily: 'var(--cth-font-mono)', fontSize: 13 }}>{output[logicalId(session.id)] ?? ''}</pre>
               <div style={{ display: 'flex', gap: 6 }}><input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void sendInput(); }} placeholder="send input" style={inputStyle} /><PixelButton variant="primary" size="sm" onClick={() => void sendInput()}>Send</PixelButton></div>
             </>}
           </div>

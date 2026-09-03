@@ -110,3 +110,39 @@ test('remote helper refuses commands and directories outside policy', async (t) 
   assert.equal(badCwd.type, 'response');
   assert.equal(badCwd.op, 'error');
 });
+
+test('snapshot replay is byte-bounded, never exceeds the frame, and reports eviction gaps', async (t) => {
+  const { RemoteHelper } = loadTs('src/remote/remoteHelper.ts');
+  const { FrameDecoder, encodeFrame, MAX_FRAME_BYTES } = loadTs('src/shared/remoteProtocol.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'md-remote-cap-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const { PassThrough } = require('node:stream');
+  const output = new PassThrough();
+  output._write = function (chunk, _enc, cb) { this.emit('frame', chunk); cb(); };
+  const helper = new RemoteHelper({ root, commands: ['printf'], output, maxBufferedBytes: 16 * 1024, maxSnapshotBytes: 16 * 1024 });
+  const frames = [];
+  output.on('frame', (chunk) => frames.push(chunk));
+
+  // 40 x 16KiB args = 640KiB of output: reliably multiple PTY events.
+  const args = Array(40).fill('x'.repeat(16 * 1024));
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'r1', op: 'start', payload: { sessionId: 'cap1', cwd: root, command: 'printf', args } });
+  await new Promise((resolve) => setTimeout(resolve, 400));
+
+  helper.handle({ protocol: PROTOCOL_VERSION, type: 'request', requestId: 'snap', op: 'snapshot', sessionId: 'cap1', payload: { sinceSeq: 0 } });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const dec = new FrameDecoder();
+  let snapshot = null;
+  for (const frame of frames) {
+    for (const message of dec.push(frame)) {
+      if (message.requestId === 'snap') snapshot = message;
+    }
+  }
+  assert.ok(snapshot, 'snapshot response expected');
+  assert.equal(snapshot.op, 'snapshot');
+  const payload = snapshot.payload;
+  assert.ok(Array.isArray(payload.events));
+  assert.ok(payload.events.length > 0, 'at least the latest event survives replay');
+  assert.ok(Buffer.byteLength(JSON.stringify(snapshot), 'utf8') < MAX_FRAME_BYTES, 'snapshot must never exceed the frame cap');
+  assert.doesNotThrow(() => encodeFrame(snapshot), 'snapshot must encode without frame-too-large');
+  assert.ok(payload.startSeq > 0, `evicted history must surface a startSeq gap, got ${payload.startSeq}`);
+});

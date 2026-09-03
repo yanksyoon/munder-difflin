@@ -9,10 +9,22 @@ export interface RemoteSessionInfo {
   seq: number;
 }
 
+export function isRemoteSessionInfo(value: unknown): value is RemoteSessionInfo {
+  if (!value || typeof value !== 'object') return false;
+  const session = value as Partial<RemoteSessionInfo>;
+  return typeof session.id === 'string' && session.id.length > 0
+    && typeof session.cwd === 'string'
+    && typeof session.command === 'string'
+    && typeof session.pid === 'number'
+    && typeof session.seq === 'number';
+}
+
 export interface RemoteBackendHandlers {
   /** Decoded PTY output for a logical session id (`remote:<sessionId>`). */
   onOutput?: (logicalId: string, text: string) => void;
   onExit?: (logicalId: string, exitCode: number, signal?: number) => void;
+  /** Every raw helper event (output, exit, hook_event) before per-kind routing. */
+  onRawEvent?: (message: RemoteMessage) => void;
   onHookEvent?: (message: RemoteMessage) => void;
   onStatus?: (connected: boolean, error?: string) => void;
 }
@@ -83,7 +95,7 @@ export class RemoteBackend {
     const listed = Array.isArray(payload?.sessions) ? payload.sessions : [];
     this.sessions.clear();
     for (const session of listed) {
-      if (session && typeof session.id === 'string') this.sessions.set(RemoteBackend.logicalId(session.id), session);
+      if (isRemoteSessionInfo(session)) this.sessions.set(RemoteBackend.logicalId(session.id), session);
     }
   }
 
@@ -91,9 +103,9 @@ export class RemoteBackend {
     sessionId?: string; cwd: string; command: string; args?: string[]; cols?: number; rows?: number;
   }): Promise<{ logicalId: string; session: RemoteSessionInfo }> {
     const response = await this.transport.request('start', input);
-    const payload = response.payload as { session?: RemoteSessionInfo } | undefined;
+    const payload = response.payload as { session?: unknown } | undefined;
     const session = payload?.session;
-    if (!session || typeof session.id !== 'string') throw new Error('remote start did not return a session');
+    if (!isRemoteSessionInfo(session)) throw new Error('remote start returned an invalid session');
     const logicalId = RemoteBackend.logicalId(session.id);
     this.sessions.set(logicalId, session);
     return { logicalId, session };
@@ -101,9 +113,9 @@ export class RemoteBackend {
 
   async attach(sessionId: string): Promise<void> {
     const response = await this.transport.request('attach', { sessionId }, sessionId);
-    const payload = response.payload as { session?: RemoteSessionInfo } | undefined;
+    const payload = response.payload as { session?: unknown } | undefined;
     const session = payload?.session;
-    if (session && typeof session.id === 'string') this.sessions.set(RemoteBackend.logicalId(session.id), session);
+    if (isRemoteSessionInfo(session)) this.sessions.set(RemoteBackend.logicalId(session.id), session);
   }
 
   async snapshot(sessionId: string, sinceSeq?: number): Promise<RemoteMessage> {
@@ -128,6 +140,7 @@ export class RemoteBackend {
   }
 
   private onEvent(message: RemoteMessage): void {
+    this.handlers.onRawEvent?.(message);
     if (!message.sessionId) return;
     const logicalId = RemoteBackend.logicalId(message.sessionId);
     if (message.op === 'output') {

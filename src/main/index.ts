@@ -2495,7 +2495,9 @@ ipcMain.handle('remote:connect', async (evt, options: unknown) => {
     const backend = new RemoteBackend({
       host: candidate.host,
       helperPath: candidate.helperPath,
+      heartbeatMs: 30_000,
       handlers: {
+        onRawEvent: (message) => remoteSenderSend(evt.sender, 'remote:event', message),
         onOutput: (logicalId, text) => remoteSenderSend(evt.sender, `pty:data:${logicalId}`, text),
         onExit: (logicalId, exitCode, signal) => remoteSenderSend(evt.sender, `pty:exit:${logicalId}`, { exitCode, signal }),
         onHookEvent: (message) => remoteSenderSend(evt.sender, 'remote:event', message),
